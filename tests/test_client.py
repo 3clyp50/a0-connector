@@ -6,11 +6,6 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CLI_SRC = REPO_ROOT / "cli" / "src"
-if CLI_SRC.as_posix() not in sys.path:
-    sys.path.insert(0, CLI_SRC.as_posix())
-
 from agent_zero_cli.client import A0Client
 
 

@@ -6,11 +6,6 @@ import pytest
 from textual.app import App
 from textual.widgets import ListView
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CLI_SRC = REPO_ROOT / "cli" / "src"
-if CLI_SRC.as_posix() not in sys.path:
-    sys.path.insert(0, CLI_SRC.as_posix())
-
 from agent_zero_cli.app import AgentZeroCLI
 from agent_zero_cli.config import CLIConfig
 from agent_zero_cli.screens.chat_list import ChatListScreen
@@ -101,7 +96,7 @@ class ChatListTestApp(App[None]):
         await self.push_screen(self._screen)
 
 
-@pytest.mark.anyio
+@pytest.mark.asyncio
 async def test_chat_list_uses_safe_ids_and_maps_back_to_context() -> None:
     contexts = [
         {"id": "ctx-1", "name": "One", "created_at": "2026-02-06", "last_message": "Hello"},
