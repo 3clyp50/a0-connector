@@ -1,0 +1,116 @@
+"""Multi-line chat input widget that grows up to 4 lines."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from textual import events
+from textual.message import Message
+from textual.widgets import TextArea
+from textual.widgets.text_area import TextAreaTheme
+
+
+_PLACEHOLDER = "Type a message... (/help for commands)"
+
+# Minimal theme so the input blends with the app style.
+_INPUT_THEME = TextAreaTheme(
+    name="chat_input",
+    syntax_styles={},
+)
+
+_MAX_CONTENT_LINES = 4
+
+
+class ChatInput(TextArea):
+    """A multi-line text input that auto-grows up to 4 lines.
+
+    * **Enter** submits the message.
+    * **Shift+Enter** / **Ctrl+J** inserts a newline.
+    * Scrolls internally when content exceeds 4 lines.
+    """
+
+    @dataclass
+    class Submitted(Message):
+        """Posted when the user presses Enter to submit."""
+
+        value: str
+        input: ChatInput
+
+    DEFAULT_CSS = """
+    ChatInput {
+        height: auto;
+        min-height: 3;
+        max-height: 6;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        placeholder: str = _PLACEHOLDER,
+        id: str | None = None,
+    ) -> None:
+        super().__init__(
+            "",
+            language=None,
+            theme="css",
+            soft_wrap=True,
+            show_line_numbers=False,
+            tab_behavior="focus",
+            id=id,
+        )
+        self._placeholder = placeholder
+
+    def on_mount(self) -> None:
+        self.register_theme(_INPUT_THEME)
+        self.theme = "chat_input"
+        self._update_height()
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, new: str) -> None:
+        self.clear()
+        if new:
+            self.insert(new)
+        self._update_height()
+
+    # ---- key handling ------------------------------------------------
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            # Submit on plain Enter
+            event.prevent_default()
+            event.stop()
+            text = self.text
+            self.clear()
+            self._update_height()
+            self.post_message(self.Submitted(value=text, input=self))
+            return
+
+        if event.key == "shift+enter" or event.key == "ctrl+j":
+            # Insert a newline
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+            self._update_height()
+            return
+
+    def _on_text_area_changed(self, _event: TextArea.Changed) -> None:
+        self._update_height()
+
+    # ---- dynamic height ---------------------------------------------
+
+    def _update_height(self) -> None:
+        line_count = self.document.line_count
+        # Clamp between 1 and MAX_CONTENT_LINES
+        visible = max(1, min(line_count, _MAX_CONTENT_LINES))
+        new_h = visible + 2  # +2 for border
+        self.styles.height = new_h
+
+    # ---- disabled state ----------------------------------------------
+
+    def watch_disabled(self, disabled: bool) -> None:
+        self.read_only = disabled

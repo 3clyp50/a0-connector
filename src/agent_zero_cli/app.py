@@ -8,7 +8,7 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.widgets import Footer, Header, RichLog
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 
@@ -16,6 +16,7 @@ from agent_zero_cli.client import A0Client
 from agent_zero_cli.config import CLIConfig, load_config
 from agent_zero_cli.screens.chat_list import ChatListScreen
 from agent_zero_cli.screens.login import LoginScreen
+from agent_zero_cli.widgets.chat_input import ChatInput
 
 
 class AgentZeroCLI(App):
@@ -43,11 +44,11 @@ class AgentZeroCLI(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
-        yield Input(placeholder="Type a message... (/help for commands)", id="message-input")
+        yield ChatInput(id="message-input")
         yield Footer()
 
     async def on_mount(self) -> None:
-        input_widget = self.query_one("#message-input", Input)
+        input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = True
         input_widget.focus()
         self._refresh_subtitle()
@@ -69,7 +70,7 @@ class AgentZeroCLI(App):
 
     async def _startup(self) -> None:
         log = self.query_one("#chat-log", RichLog)
-        input_widget = self.query_one("#message-input", Input)
+        input_widget = self.query_one("#message-input", ChatInput)
 
         log.write("[dim]Connecting to Agent Zero...[/dim]")
         if not await self.client.check_health():
@@ -103,7 +104,7 @@ class AgentZeroCLI(App):
         log.write("[green]Connected to Agent Zero.[/green]")
         input_widget.disabled = False
 
-    async def _prompt_install(self, log: RichLog, input_widget: Input) -> bool:
+    async def _prompt_install(self, log: RichLog, input_widget: ChatInput) -> bool:
         log.write("[dim]Would you like to install Agent Zero? (y/n)[/dim]")
         loop = asyncio.get_running_loop()
         self._install_prompt_future = loop.create_future()
@@ -154,7 +155,7 @@ class AgentZeroCLI(App):
         if isinstance(log_version, int):
             self.log_cursor = max(self.log_cursor, log_version)
         self.agent_active = bool(snapshot.get("log_progress_active", False))
-        input_widget = self.query_one("#message-input", Input)
+        input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = self.agent_active
         contexts = snapshot.get("contexts")
         if isinstance(contexts, list):
@@ -212,7 +213,7 @@ class AgentZeroCLI(App):
             text = f"{heading}: {content}" if heading else content
             log.write(text)
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
         if not text:
