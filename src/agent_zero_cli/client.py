@@ -50,23 +50,42 @@ class A0Client:
     # ------------------------------------------------------------------
 
     async def check_health(self) -> bool:
+        """Check if the A0 instance is reachable.
+
+        Uses the connector plugin capabilities endpoint (public, POST, no auth).
+        Falls back to checking if the root URL responds.
+        """
         try:
-            response = await self.http.get(self._url("/health"), timeout=5.0)
+            response = await self.http.post(
+                self._api_url("capabilities"),
+                json={},
+                timeout=5.0,
+            )
+            return response.status_code == 200
         except (httpx.ConnectError, httpx.TimeoutException):
             return False
-        return response.status_code == 200
+        except Exception:
+            # Fallback: just check if server responds at all
+            try:
+                response = await self.http.get(
+                    self._url("/"), timeout=5.0, follow_redirects=False
+                )
+                return response.status_code in {200, 302}
+            except Exception:
+                return False
 
     async def needs_auth(self) -> bool:
         """Check if the instance requires authentication.
 
-        Tries the connector capabilities endpoint first (public, no auth).
-        If that works, tries a protected endpoint to see if session is valid.
-        Falls back to the legacy /csrf_token check.
+        Tries the connector plugin's protected chats_list endpoint (POST).
+        A 302 redirect or 401/403 means auth is required.
+        A 200 means already authenticated or no auth configured.
         """
         try:
-            # Try a protected connector endpoint
-            response = await self.http.get(
-                self._api_url("chats_list"), follow_redirects=False
+            response = await self.http.post(
+                self._api_url("chats_list"),
+                json={},
+                follow_redirects=False,
             )
             if response.status_code == 200:
                 return False  # Already authenticated or no auth required
@@ -75,15 +94,15 @@ class A0Client:
         except Exception:
             pass
 
-        # Fallback: legacy csrf_token endpoint
+        # Fallback: check if root URL redirects to /login
         try:
             response = await self.http.get(
-                self._url("/csrf_token"), follow_redirects=False
+                self._url("/"), follow_redirects=False
             )
-            if response.status_code == 200:
-                return False
-            if response.status_code == 302 and response.headers.get("location") == "/login":
-                return True
+            if response.status_code == 302:
+                location = response.headers.get("location", "")
+                if "/login" in location:
+                    return True
             return response.status_code in {401, 403}
         except Exception:
             return True
@@ -117,12 +136,13 @@ class A0Client:
 
     async def connect_websocket(self) -> None:
         """Connect to the /connector WebSocket namespace with session cookies."""
-        cookie_header = self._build_cookie_header()
-        headers = {
-            "Cookie": cookie_header,
+        headers: dict[str, str] = {
             "Origin": self.base_url,
             "Referer": f"{self.base_url}/",
         }
+        cookie_header = self._build_cookie_header()
+        if cookie_header:
+            headers["Cookie"] = cookie_header
 
         # Register event handlers
         ns = "/connector"
@@ -248,7 +268,9 @@ class A0Client:
 
     async def list_chats(self) -> list[dict[str, Any]]:
         """List all active chat contexts."""
-        response = await self.http.get(self._api_url("chats_list"))
+        response = await self.http.post(
+            self._api_url("chats_list"), json={}
+        )
         response.raise_for_status()
         data = response.json()
         return data.get("contexts", data.get("chats", []))
@@ -263,7 +285,9 @@ class A0Client:
 
     async def list_projects(self) -> list[dict[str, Any]]:
         """List available projects."""
-        response = await self.http.get(self._api_url("projects_list"))
+        response = await self.http.post(
+            self._api_url("projects_list"), json={}
+        )
         response.raise_for_status()
         data = response.json()
         return data.get("projects", [])
