@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,24 @@ from agent_zero_cli.config import CLIConfig, load_config
 from agent_zero_cli.screens.chat_list import ChatListScreen
 from agent_zero_cli.screens.login import LoginScreen
 from agent_zero_cli.widgets.chat_input import ChatInput
+
+
+# Connector event type → display category
+_EVENT_CATEGORY: dict[str, str] = {
+    "user_message": "user",
+    "assistant_message": "response",
+    "assistant_delta": "response",
+    "tool_start": "tool",
+    "tool_output": "tool",
+    "tool_end": "tool",
+    "code_start": "code",
+    "code_output": "code",
+    "warning": "warning",
+    "error": "error",
+    "status": "info",
+    "message_complete": "info",
+    "context_updated": "info",
+}
 
 
 class AgentZeroCLI(App):
@@ -36,9 +55,6 @@ class AgentZeroCLI(App):
         self.config = config or load_config()
         self.client = A0Client(self.config.instance_url)
         self.current_context: str | None = None
-        self.log_cursor = 0
-        self.log_guid: str | None = None
-        self.contexts: list[dict[str, Any]] = []
         self._install_prompt_future: asyncio.Future[bool] | None = None
 
     def compose(self) -> ComposeResult:
@@ -68,6 +84,10 @@ class AgentZeroCLI(App):
         else:
             self.sub_title = "Disconnected"
 
+    # ------------------------------------------------------------------
+    # Startup
+    # ------------------------------------------------------------------
+
     async def _startup(self) -> None:
         log = self.query_one("#chat-log", RichLog)
         input_widget = self.query_one("#message-input", ChatInput)
@@ -87,6 +107,7 @@ class AgentZeroCLI(App):
                 input_widget.disabled = True
                 return
 
+        # Auth check and login
         if await self.client.needs_auth():
             login_ok = await self.push_screen_wait(LoginScreen(self.client))
             if not login_ok:
@@ -94,15 +115,37 @@ class AgentZeroCLI(App):
                 self.exit(return_code=1)
                 return
 
-        self.client.on_state_push = self._handle_state_push
+        # Wire up callbacks
         self.client.on_connect = lambda: self._run_on_ui(self._set_connected, True)
         self.client.on_disconnect = lambda: self._run_on_ui(self._set_connected, False)
+        self.client.on_context_snapshot = lambda data: self._run_on_ui(
+            self._handle_context_snapshot, data
+        )
+        self.client.on_context_event = lambda data: self._run_on_ui(
+            self._handle_context_event, data
+        )
+        self.client.on_context_complete = lambda data: self._run_on_ui(
+            self._handle_context_complete, data
+        )
+        self.client.on_error = lambda data: self._run_on_ui(
+            self._handle_connector_error, data
+        )
+        self.client.on_file_op = self._handle_file_op
 
+        # Connect WebSocket and initialize
         await self.client.connect_websocket()
+        await self.client.send_hello()
+
+        # Create initial chat context
         self.current_context = await self.client.create_chat()
-        await self.client.request_state(self.current_context)
+        await self.client.subscribe_context(self.current_context)
+
         log.write("[green]Connected to Agent Zero.[/green]")
         input_widget.disabled = False
+
+    # ------------------------------------------------------------------
+    # Install prompt (unchanged)
+    # ------------------------------------------------------------------
 
     async def _prompt_install(self, log: RichLog, input_widget: ChatInput) -> bool:
         log.write("[dim]Would you like to install Agent Zero? (y/n)[/dim]")
@@ -124,100 +167,225 @@ class AgentZeroCLI(App):
     def _install_script_path(self) -> Path:
         return Path(__file__).resolve().parents[3] / "install.sh"
 
+    # ------------------------------------------------------------------
+    # UI helpers
+    # ------------------------------------------------------------------
+
     def _set_connected(self, value: bool) -> None:
         self.connected = value
 
-    def _handle_state_push(self, data: dict[str, Any]) -> None:
-        self._run_on_ui(self._handle_state_push_ui, data)
-
     def _run_on_ui(self, func: Any, *args: Any) -> None:
-        app_loop = getattr(self, "loop", None)  # type: ignore[attr-defined]
+        app_loop = getattr(self, "loop", None)
         if app_loop is None:
             func(*args)
         else:
             app_loop.call_soon_threadsafe(func, *args)
 
-    def _handle_state_push_ui(self, data: dict[str, Any]) -> None:
-        payload = data.get("data", data)
-        snapshot = payload.get("snapshot", payload)
-        log_widget = self.query_one("#chat-log", RichLog)
-        log_guid = snapshot.get("log_guid")
-        if log_guid and log_guid != self.log_guid:
-            self.log_guid = log_guid
-            self.log_cursor = 0
-            log_widget.clear()
-        logs = snapshot.get("logs", [])
-        if isinstance(logs, list):
-            for entry in logs:
-                if isinstance(entry, dict):
-                    self._render_log_entry(log_widget, entry)
-        log_version = snapshot.get("log_version")
-        if isinstance(log_version, int):
-            self.log_cursor = max(self.log_cursor, log_version)
-        self.agent_active = bool(snapshot.get("log_progress_active", False))
-        input_widget = self.query_one("#message-input", ChatInput)
-        input_widget.disabled = self.agent_active
-        contexts = snapshot.get("contexts")
-        if isinstance(contexts, list):
-            self.contexts = contexts
+    # ------------------------------------------------------------------
+    # Connector event handlers
+    # ------------------------------------------------------------------
 
-    def _render_log_entry(self, log: RichLog, entry: dict[str, Any]) -> None:
-        entry_type = entry.get("type", "")
-        heading = entry.get("heading", "")
-        content = entry.get("content", "")
-        if heading is None:
-            heading = ""
-        if content is None:
-            content = ""
-        if not isinstance(heading, str):
-            heading = str(heading)
-        if not isinstance(content, str):
-            content = str(content)
-
-        if entry_type == "response":
-            log.write("[bold green]Agent Zero:[/bold green]")
-            if content:
-                log.write(Markdown(content))
+    def _handle_context_snapshot(self, data: dict[str, Any]) -> None:
+        """Handle a batch of historical events from subscribe_context."""
+        context_id = data.get("context_id", "")
+        if context_id != self.current_context:
             return
 
-        if entry_type == "tool":
+        log = self.query_one("#chat-log", RichLog)
+        events = data.get("events", [])
+        for event in events:
+            self._render_connector_event(log, event)
+
+    def _handle_context_event(self, data: dict[str, Any]) -> None:
+        """Handle a single streaming event from the agent."""
+        context_id = data.get("context_id", "")
+        if context_id != self.current_context:
+            return
+
+        # Agent is active while we receive events
+        self.agent_active = True
+        input_widget = self.query_one("#message-input", ChatInput)
+        input_widget.disabled = True
+
+        log = self.query_one("#chat-log", RichLog)
+        self._render_connector_event(log, data)
+
+    def _handle_context_complete(self, data: dict[str, Any]) -> None:
+        """Handle agent completion — re-enable input."""
+        context_id = data.get("context_id", "")
+        if context_id != self.current_context:
+            return
+
+        self.agent_active = False
+        input_widget = self.query_one("#message-input", ChatInput)
+        input_widget.disabled = False
+        input_widget.focus()
+
+    def _handle_connector_error(self, data: dict[str, Any]) -> None:
+        """Handle error events from the connector."""
+        log = self.query_one("#chat-log", RichLog)
+        code = data.get("code", "ERROR")
+        message = data.get("message", "Unknown error")
+        log.write(f"[red]{code}: {message}[/red]")
+
+    def _handle_file_op(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Handle file operation requests from text_editor_remote."""
+        op_id = data.get("op_id", "")
+        op = data.get("op", "")
+        path = data.get("path", "")
+
+        try:
+            if op == "read":
+                return self._file_op_read(op_id, path, data)
+            elif op == "write":
+                return self._file_op_write(op_id, path, data)
+            elif op == "patch":
+                return self._file_op_patch(op_id, path, data)
+            else:
+                return {"op_id": op_id, "ok": False, "error": f"Unknown op: {op}"}
+        except Exception as e:
+            return {"op_id": op_id, "ok": False, "error": str(e)}
+
+    def _file_op_read(self, op_id: str, path: str, data: dict) -> dict:
+        """Read a file from the local filesystem."""
+        line_from = data.get("line_from")
+        line_to = data.get("line_to")
+
+        if not os.path.isfile(path):
+            return {"op_id": op_id, "ok": False, "error": f"File not found: {path}"}
+
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        total = len(lines)
+        start = (line_from - 1) if line_from and line_from > 0 else 0
+        end = line_to if line_to and line_to <= total else total
+        selected = lines[start:end]
+
+        content = ""
+        for i, line in enumerate(selected, start=start + 1):
+            content += f"{i:>4} | {line}"
+
+        return {
+            "op_id": op_id,
+            "ok": True,
+            "result": {
+                "content": content,
+                "total_lines": total,
+                "line_from": start + 1,
+                "line_to": end,
+            },
+        }
+
+    def _file_op_write(self, op_id: str, path: str, data: dict) -> dict:
+        """Write content to a file on the local filesystem."""
+        content = data.get("content", "")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"op_id": op_id, "ok": True, "result": {"path": path}}
+
+    def _file_op_patch(self, op_id: str, path: str, data: dict) -> dict:
+        """Apply line-based edits to a file on the local filesystem."""
+        edits = data.get("edits", [])
+        if not os.path.isfile(path):
+            return {"op_id": op_id, "ok": False, "error": f"File not found: {path}"}
+
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        # Sort edits by 'from' descending to apply bottom-up
+        sorted_edits = sorted(edits, key=lambda e: e.get("from", 0), reverse=True)
+        for edit in sorted_edits:
+            fr = edit.get("from", 1)
+            to = edit.get("to")
+            content = edit.get("content")
+            idx = fr - 1  # 0-based
+
+            if to is None and content is not None:
+                # Insert before line
+                new_lines = content.splitlines(True)
+                lines[idx:idx] = new_lines
+            elif content is None:
+                # Delete lines
+                to_idx = to if to else fr
+                del lines[idx:to_idx]
+            else:
+                # Replace lines
+                to_idx = to if to else fr
+                new_lines = content.splitlines(True)
+                lines[idx:to_idx] = new_lines
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
+        return {"op_id": op_id, "ok": True, "result": {"path": path}}
+
+    # ------------------------------------------------------------------
+    # Event rendering
+    # ------------------------------------------------------------------
+
+    def _render_connector_event(self, log: RichLog, event: dict[str, Any]) -> None:
+        """Render a connector event to the chat log."""
+        event_type = event.get("event", "")
+        data = event.get("data", {})
+        text = data.get("text", "")
+        heading = data.get("heading", "")
+
+        category = _EVENT_CATEGORY.get(event_type, "info")
+
+        if category == "user":
+            if text:
+                log.write(f"[bold cyan]You:[/bold cyan] {text}")
+            return
+
+        if category == "response":
+            log.write("[bold green]Agent Zero:[/bold green]")
+            if text:
+                log.write(Markdown(text))
+            return
+
+        if category == "tool":
             title = heading or "Tool"
             log.write(f"[dim]Tool: {title}[/dim]")
-            if content:
-                log.write(f"[dim]{content}[/dim]")
+            if text:
+                log.write(f"[dim]{text}[/dim]")
             return
 
-        if entry_type == "code_exe":
+        if category == "code":
             title = heading or "Code"
             log.write(f"[dim]Code: {title}[/dim]")
-            if content:
-                log.write(Syntax(content, "text", word_wrap=True))
+            if text:
+                log.write(Syntax(text, "text", word_wrap=True))
             return
 
-        if entry_type == "warning":
-            text = f"{heading}: {content}" if heading else content
-            log.write(f"[yellow]{text}[/yellow]")
+        if category == "warning":
+            msg = f"{heading}: {text}" if heading else text
+            log.write(f"[yellow]{msg}[/yellow]")
             return
 
-        if entry_type == "error":
-            text = f"{heading}: {content}" if heading else content
-            log.write(f"[red]{text}[/red]")
+        if category == "error":
+            msg = f"{heading}: {text}" if heading else text
+            log.write(f"[red]{msg}[/red]")
             return
 
-        if entry_type == "info":
-            text = f"{heading}: {content}" if heading else content
-            log.write(f"[dim]{text}[/dim]")
+        if category == "info":
+            if heading or text:
+                msg = f"{heading}: {text}" if heading else text
+                log.write(f"[dim]{msg}[/dim]")
             return
 
-        if heading or content:
-            text = f"{heading}: {content}" if heading else content
-            log.write(text)
+    # ------------------------------------------------------------------
+    # Message submission
+    # ------------------------------------------------------------------
 
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
         if not text:
             return
+
+        # Handle install prompt
         if self._install_prompt_future and not self._install_prompt_future.done():
             response = text.lower()
             if response in {"y", "yes"}:
@@ -229,10 +397,12 @@ class AgentZeroCLI(App):
                 log.write("[yellow]Please answer y or n.[/yellow]")
             return
 
+        # Handle commands
         if text.startswith("/"):
             await self._handle_command(text)
             return
 
+        # Send message
         log = self.query_one("#chat-log", RichLog)
         if not self.current_context:
             log.write("[red]No active chat context.[/red]")
@@ -240,11 +410,18 @@ class AgentZeroCLI(App):
 
         log.write(f"[bold cyan]You:[/bold cyan] {text}")
         event.input.disabled = True
+        self.agent_active = True
+        self._refresh_subtitle()
         try:
             await self.client.send_message(text, self.current_context)
-        except Exception as exc:  # pragma: no cover - network errors
+        except Exception as exc:
             log.write(f"[red]Error sending message: {exc}[/red]")
             event.input.disabled = False
+            self.agent_active = False
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
 
     async def _handle_command(self, text: str) -> None:
         command = text.split()[0].lower()
@@ -268,25 +445,34 @@ class AgentZeroCLI(App):
 
     async def _cmd_chats(self) -> None:
         log = self.query_one("#chat-log", RichLog)
-        if not self.contexts:
+        try:
+            contexts = await self.client.list_chats()
+        except Exception as exc:
+            log.write(f"[red]Error listing chats: {exc}[/red]")
+            return
+
+        if not contexts:
             log.write("[dim]No previous chats found.[/dim]")
             return
-        result = await self.push_screen_wait(ChatListScreen(self.contexts))
+
+        result = await self.push_screen_wait(ChatListScreen(contexts))
         if not result:
             return
+
+        # Unsubscribe from current, switch, subscribe to new
+        if self.current_context:
+            await self.client.unsubscribe_context(self.current_context)
         self.current_context = result
-        self.log_cursor = 0
-        self.log_guid = None
         log.clear()
-        await self.client.request_state(result, log_from=0)
+        await self.client.subscribe_context(result, from_seq=0)
 
     async def _cmd_new(self) -> None:
         log = self.query_one("#chat-log", RichLog)
+        if self.current_context:
+            await self.client.unsubscribe_context(self.current_context)
         self.current_context = await self.client.create_chat()
-        self.log_cursor = 0
-        self.log_guid = None
         log.clear()
-        await self.client.request_state(self.current_context, log_from=0)
+        await self.client.subscribe_context(self.current_context)
 
     async def _cmd_exit(self) -> None:
         await self.client.disconnect()

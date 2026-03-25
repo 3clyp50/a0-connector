@@ -1,9 +1,22 @@
+"""A0Client — communicates with Agent Zero via the /connector plugin namespace.
+
+Auth flow:
+  1. POST /login with username/password → session cookie
+  2. Connect to /connector WS with session cookie (no CSRF needed)
+  3. Send hello → subscribe_context → send_message
+"""
 from __future__ import annotations
 
+import asyncio
+import uuid
 from typing import Any, Callable
 
 import httpx
 import socketio
+
+
+# Connector plugin API base path
+_PLUGIN_API = "/api/plugins/a0_connector/v1"
 
 
 class A0Client:
@@ -13,18 +26,28 @@ class A0Client:
         self.base_url = base_url.rstrip("/")
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
         self.sio = socketio.AsyncClient()
-        self.csrf_token: str | None = None
-        self.runtime_id: str | None = None
         self.connected = False
         self.authenticated = False
-        self.contexts: list[dict[str, Any]] = []
 
-        self.on_state_push: Callable[[dict[str, Any]], None] | None = None
+        # Callbacks
         self.on_connect: Callable[[], None] | None = None
         self.on_disconnect: Callable[[], None] | None = None
+        self.on_context_event: Callable[[dict[str, Any]], None] | None = None
+        self.on_context_snapshot: Callable[[dict[str, Any]], None] | None = None
+        self.on_context_complete: Callable[[dict[str, Any]], None] | None = None
+        self.on_message_accepted: Callable[[dict[str, Any]], None] | None = None
+        self.on_error: Callable[[dict[str, Any]], None] | None = None
+        self.on_file_op: Callable[[dict[str, Any]], Any] | None = None
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
+
+    def _api_url(self, endpoint: str) -> str:
+        return f"{self.base_url}{_PLUGIN_API}/{endpoint}"
+
+    # ------------------------------------------------------------------
+    # Health & auth
+    # ------------------------------------------------------------------
 
     async def check_health(self) -> bool:
         try:
@@ -34,19 +57,39 @@ class A0Client:
         return response.status_code == 200
 
     async def needs_auth(self) -> bool:
-        response = await self.http.get(self._url("/csrf_token"), follow_redirects=False)
-        if response.status_code == 200:
-            data = response.json()
-            token = data.get("token") or data.get("csrf_token")
-            if token:
-                self.csrf_token = token
-                self.runtime_id = data.get("runtime_id")
-            return False
-        if response.status_code == 302 and response.headers.get("location") == "/login":
+        """Check if the instance requires authentication.
+
+        Tries the connector capabilities endpoint first (public, no auth).
+        If that works, tries a protected endpoint to see if session is valid.
+        Falls back to the legacy /csrf_token check.
+        """
+        try:
+            # Try a protected connector endpoint
+            response = await self.http.get(
+                self._api_url("chats_list"), follow_redirects=False
+            )
+            if response.status_code == 200:
+                return False  # Already authenticated or no auth required
+            if response.status_code in {302, 401, 403}:
+                return True
+        except Exception:
+            pass
+
+        # Fallback: legacy csrf_token endpoint
+        try:
+            response = await self.http.get(
+                self._url("/csrf_token"), follow_redirects=False
+            )
+            if response.status_code == 200:
+                return False
+            if response.status_code == 302 and response.headers.get("location") == "/login":
+                return True
+            return response.status_code in {401, 403}
+        except Exception:
             return True
-        return response.status_code in {401, 403}
 
     async def login(self, username: str, password: str) -> bool:
+        """Login with username/password. Session cookie is stored automatically."""
         response = await self.http.post(
             self._url("/login"),
             data={"username": username, "password": password},
@@ -57,41 +100,23 @@ class A0Client:
             return self.authenticated
         return False
 
-    async def _fetch_csrf_token(self) -> str:
-        response = await self.http.get(self._url("/csrf_token"), follow_redirects=False)
-        if response.status_code != 200:
-            raise RuntimeError("Failed to fetch CSRF token")
-        data = response.json()
-        token = data.get("token") or data.get("csrf_token")
-        if not token:
-            raise RuntimeError("CSRF token missing from response")
-        self.csrf_token = token
-        self.runtime_id = data.get("runtime_id")
-        return token
-
-    async def _ensure_csrf(self) -> None:
-        if not self.csrf_token:
-            await self._fetch_csrf_token()
-
-    def _get_headers(self) -> dict[str, str]:
-        if self.csrf_token:
-            return {"X-CSRF-Token": self.csrf_token}
-        return {}
+    # ------------------------------------------------------------------
+    # Cookie helpers
+    # ------------------------------------------------------------------
 
     def _build_cookie_header(self) -> str:
+        """Build Cookie header from session cookies (no CSRF needed)."""
         parts: list[str] = []
-        existing_names: set[str] = set()
         for cookie in self.http.cookies.jar:
             parts.append(f"{cookie.name}={cookie.value}")
-            existing_names.add(cookie.name)
-        if self.runtime_id and self.csrf_token:
-            csrf_cookie = f"csrf_token_{self.runtime_id}"
-            if csrf_cookie not in existing_names:
-                parts.append(f"{csrf_cookie}={self.csrf_token}")
         return "; ".join(parts)
 
+    # ------------------------------------------------------------------
+    # WebSocket — /connector namespace
+    # ------------------------------------------------------------------
+
     async def connect_websocket(self) -> None:
-        await self._ensure_csrf()
+        """Connect to the /connector WebSocket namespace with session cookies."""
         cookie_header = self._build_cookie_header()
         headers = {
             "Cookie": cookie_header,
@@ -99,90 +124,153 @@ class A0Client:
             "Referer": f"{self.base_url}/",
         }
 
-        async def _on_state_push(data: dict[str, Any]) -> None:
-            self._handle_state_push(data)
+        # Register event handlers
+        ns = "/connector"
 
+        @self.sio.on("connect", namespace=ns)
         async def _on_connect() -> None:
             self.connected = True
-            callback = self.on_connect
-            if callback is not None:
-                callback()
+            cb = self.on_connect
+            if cb is not None:
+                cb()
 
+        @self.sio.on("disconnect", namespace=ns)
         async def _on_disconnect() -> None:
             self.connected = False
-            callback = self.on_disconnect
-            if callback is not None:
-                callback()
+            cb = self.on_disconnect
+            if cb is not None:
+                cb()
 
-        self.sio.on("state_push", handler=_on_state_push, namespace="/state_sync")
-        self.sio.on("connect", handler=_on_connect, namespace="/state_sync")
-        self.sio.on("disconnect", handler=_on_disconnect, namespace="/state_sync")
+        @self.sio.on("hello_ok", namespace=ns)
+        async def _on_hello_ok(data: dict[str, Any]) -> None:
+            pass  # Protocol handshake ack
+
+        @self.sio.on("context_snapshot", namespace=ns)
+        async def _on_context_snapshot(data: dict[str, Any]) -> None:
+            cb = self.on_context_snapshot
+            if cb is not None:
+                cb(data)
+
+        @self.sio.on("context_event", namespace=ns)
+        async def _on_context_event(data: dict[str, Any]) -> None:
+            cb = self.on_context_event
+            if cb is not None:
+                cb(data)
+
+        @self.sio.on("context_complete", namespace=ns)
+        async def _on_context_complete(data: dict[str, Any]) -> None:
+            cb = self.on_context_complete
+            if cb is not None:
+                cb(data)
+
+        @self.sio.on("message_accepted", namespace=ns)
+        async def _on_message_accepted(data: dict[str, Any]) -> None:
+            cb = self.on_message_accepted
+            if cb is not None:
+                cb(data)
+
+        @self.sio.on("error", namespace=ns)
+        async def _on_error(data: dict[str, Any]) -> None:
+            cb = self.on_error
+            if cb is not None:
+                cb(data)
+
+        @self.sio.on("file_op", namespace=ns)
+        async def _on_file_op(data: dict[str, Any]) -> dict[str, Any]:
+            """Handle file operation requests from text_editor_remote."""
+            cb = self.on_file_op
+            if cb is not None:
+                result = cb(data)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return result
+            return {"op_id": data.get("op_id"), "ok": False, "error": "No file_op handler"}
 
         await self.sio.connect(
             self.base_url,
-            namespaces=["/state_sync"],
-            auth={"csrf_token": self.csrf_token},
+            namespaces=[ns],
             headers=headers,
             transports=["websocket"],
         )
 
-    def _handle_state_push(self, data: dict[str, Any]) -> None:
-        payload = data.get("data", data)
-        snapshot = payload.get("snapshot", payload)
-        contexts = snapshot.get("contexts")
-        if isinstance(contexts, list):
-            self.contexts = contexts
-        callback = self.on_state_push
-        if callback is not None:
-            callback(data)
+    async def send_hello(self) -> None:
+        """Send protocol hello to the /connector namespace."""
+        await self.sio.emit(
+            "hello",
+            {
+                "protocol": "a0-connector.v1",
+                "client": "agent-zero-cli",
+                "client_version": "0.1.0",
+            },
+            namespace="/connector",
+        )
 
-    async def request_state(self, context_id: str | None, log_from: int = 0) -> dict[str, Any]:
-        payload = {
-            "context": context_id,
-            "log_from": log_from,
-            "notifications_from": 0,
-            "timezone": "UTC",
-        }
-        response = await self.sio.call("state_request", payload, namespace="/state_sync")
-        if isinstance(response, dict) and "results" in response:
-            results = response.get("results") or []
-            if results and isinstance(results[0], dict):
-                data = results[0].get("data")
-                return data if isinstance(data, dict) else {}
-        return response if isinstance(response, dict) else {}
+    async def subscribe_context(self, context_id: str, from_seq: int = 0) -> None:
+        """Subscribe to events from a context."""
+        await self.sio.emit(
+            "subscribe_context",
+            {"context_id": context_id, "from": from_seq},
+            namespace="/connector",
+        )
 
-    async def _api_call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        await self._ensure_csrf()
-        extra_headers = kwargs.pop("headers", {})
-        headers = {**self._get_headers(), **extra_headers}
-        response = await self.http.request(method, self._url(path), headers=headers, **kwargs)
-        if response.status_code == 403:
-            await self._fetch_csrf_token()
-            headers = {**self._get_headers(), **extra_headers}
-            response = await self.http.request(method, self._url(path), headers=headers, **kwargs)
-        return response
+    async def unsubscribe_context(self, context_id: str) -> None:
+        """Unsubscribe from a context's events."""
+        await self.sio.emit(
+            "unsubscribe_context",
+            {"context_id": context_id},
+            namespace="/connector",
+        )
+
+    async def send_message(self, text: str, context_id: str) -> None:
+        """Send a chat message to a context via the /connector WS."""
+        await self.sio.emit(
+            "send_message",
+            {
+                "context_id": context_id,
+                "message": text,
+                "client_message_id": str(uuid.uuid4()),
+            },
+            namespace="/connector",
+        )
+
+    # ------------------------------------------------------------------
+    # REST API — chat management
+    # ------------------------------------------------------------------
 
     async def create_chat(self) -> str:
-        response = await self._api_call("POST", "/chat_create", json={})
-        response.raise_for_status()
-        data = response.json()
-        return data.get("ctxid", "")
-
-    async def list_chats(self) -> list[dict[str, Any]]:
-        return self.contexts
-
-    async def remove_chat(self, context_id: str) -> None:
-        response = await self._api_call("POST", "/chat_remove", json={"context": context_id})
-        response.raise_for_status()
-
-    async def send_message(self, text: str, context_id: str) -> dict[str, Any]:
-        response = await self._api_call(
-            "POST",
-            "/message_async",
-            json={"text": text, "context": context_id},
+        """Create a new chat context via the connector API."""
+        response = await self.http.post(
+            self._api_url("chat_create"), json={}
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        return data.get("context_id") or data.get("ctxid", "")
+
+    async def list_chats(self) -> list[dict[str, Any]]:
+        """List all active chat contexts."""
+        response = await self.http.get(self._api_url("chats_list"))
+        response.raise_for_status()
+        data = response.json()
+        return data.get("contexts", data.get("chats", []))
+
+    async def remove_chat(self, context_id: str) -> None:
+        """Delete a chat context."""
+        response = await self.http.post(
+            self._api_url("chat_delete"),
+            json={"context_id": context_id},
+        )
+        response.raise_for_status()
+
+    async def list_projects(self) -> list[dict[str, Any]]:
+        """List available projects."""
+        response = await self.http.get(self._api_url("projects_list"))
+        response.raise_for_status()
+        data = response.json()
+        return data.get("projects", [])
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
     async def disconnect(self) -> None:
         if self.sio.connected:
