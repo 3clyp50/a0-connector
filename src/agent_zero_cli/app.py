@@ -80,6 +80,7 @@ class AgentZeroCLI(App):
         self.current_context: str | None = None
         self._last_status_label: str = ""
         self._last_logged_label: str = ""
+        self._response_delivered: bool = False
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
@@ -310,15 +311,37 @@ class AgentZeroCLI(App):
         if context_id != self.current_context:
             return
 
+        event_type = data.get("event", "")
+        category = _EVENT_CATEGORY.get(event_type, "info")
+        log = self.query_one("#chat-log", RichLog)
+
+        # Once the final response has been delivered, silently drop all
+        # post-response events (memory writes, status pings, etc.) except
+        # errors and warnings which always surface.
+        if self._response_delivered:
+            if category in ("error", "warning"):
+                self._render_connector_event(log, data)
+            return
+
         self.agent_active = True
         input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = True
 
+        # When the actual response arrives, immediately re-enable input and
+        # mark delivery so subsequent post-response events are dropped.
+        if category == "response":
+            self._response_delivered = True
+            self.agent_active = False
+            input_widget.disabled = False
+            input_widget.focus()
+            self._set_idle()
+            self._last_logged_label = ""
+            self._render_connector_event(log, data)
+            return
+
         # Update activity bar and log each distinct label once
-        event_type = data.get("event", "")
         label = _STATUS_LABEL.get(event_type)
-        log = self.query_one("#chat-log", RichLog)
-        if label and label != "Responding":
+        if label:
             event_data = data.get("data", {})
             detail = self._extract_detail(event_type, event_data)
             self._set_activity(label, detail)
@@ -338,6 +361,7 @@ class AgentZeroCLI(App):
             return
 
         self.agent_active = False
+        self._response_delivered = False
         input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = False
         input_widget.focus()
@@ -545,6 +569,7 @@ class AgentZeroCLI(App):
         if self.current_context:
             await self.client.unsubscribe_context(self.current_context)
         self.current_context = result
+        self._response_delivered = False
         log.clear()
         self._set_idle()
         self._last_logged_label = ""
@@ -555,6 +580,7 @@ class AgentZeroCLI(App):
         if self.current_context:
             await self.client.unsubscribe_context(self.current_context)
         self.current_context = await self.client.create_chat()
+        self._response_delivered = False
         log.clear()
         self._set_idle()
         self._last_logged_label = ""
