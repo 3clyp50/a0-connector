@@ -34,10 +34,19 @@ class FakeInput:
 
 class FakeStatusBar:
     def __init__(self) -> None:
-        self.text = "Waiting for input"
+        self.label = ""
+        self.detail = ""
+        self.idle = True
 
-    def update(self, text: str) -> None:
-        self.text = text
+    def set_activity(self, label: str, detail: str = "") -> None:
+        self.label = label
+        self.detail = detail
+        self.idle = False
+
+    def set_idle(self) -> None:
+        self.label = ""
+        self.detail = ""
+        self.idle = True
 
 
 class DummyAgentZeroCLI(AgentZeroCLI):
