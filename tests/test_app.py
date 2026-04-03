@@ -11,16 +11,53 @@ from agent_zero_cli.screens.host_input import HostInputScreen
 from agent_zero_cli.screens.login import LoginResult, LoginScreen
 
 
-class FakeRichLog:
+class FakeChatLog:
     def __init__(self) -> None:
         self.writes: list[object] = []
         self.cleared = False
+        self.lines: list[object] = []
+        self._line_cache = type("Cache", (), {"clear": lambda self: None})()
+        self.app = None  # set later if needed
+        self.sequences: dict[int, object] = {}
+        self._active_seq: int | None = None
+        self._active_label: str = ""
+        self._active_detail: str = ""
 
     def write(self, message: object) -> None:
         self.writes.append(message)
+        self.lines.append(message)
+
+    def append_or_update(
+        self, sequence: int, renderable: object, scroll: bool = True
+    ) -> None:
+        if sequence not in self.sequences:
+            self.writes.append(renderable)
+        self.sequences[sequence] = renderable
+
+    def set_active_status(self, seq: int, label: str, detail: str) -> None:
+        self._active_seq = seq
+        self._active_label = label
+        self._active_detail = detail
+        self.append_or_update(seq, f"active:{label}:{detail}")
+
+    def dim_active_status(self) -> None:
+        if self._active_seq is not None:
+            self.append_or_update(
+                self._active_seq, f"dim:{self._active_label}:{self._active_detail}"
+            )
+        self._active_seq = None
+        self._active_label = ""
+        self._active_detail = ""
+
+    def advance_shimmer(self) -> None:
+        pass
 
     def clear(self) -> None:
         self.cleared = True
+        self.lines.clear()
+        self.sequences.clear()
+        self._active_seq = None
+
 
 
 class FakeInput:
@@ -55,14 +92,11 @@ class DummyAgentZeroCLI(AgentZeroCLI):
         )
         self.rendered_events: list[dict] = []
 
-    def _render_connector_event(self, log: FakeRichLog, event: dict) -> None:
-        self.rendered_events.append(event)
-
 
 @pytest.fixture
-def dummy_app() -> DummyAgentZeroCLI:
+def dummy_app(monkeypatch: pytest.MonkeyPatch) -> DummyAgentZeroCLI:
     app = DummyAgentZeroCLI()
-    log = FakeRichLog()
+    log = FakeChatLog()
     input_widget = FakeInput()
 
     def _query_one(selector: str, cls: object = None) -> object:
@@ -73,6 +107,11 @@ def dummy_app() -> DummyAgentZeroCLI:
     app.query_one = _query_one
     app._test_log = log
     app._test_input = input_widget
+
+    monkeypatch.setattr(
+        "agent_zero_cli.app.render_connector_event",
+        lambda log, event: app.rendered_events.append(event),
+    )
     return app
 
 
@@ -99,7 +138,7 @@ async def test_startup_falls_back_to_default_host_when_prompt_returns_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentZeroCLI(config=CLIConfig(instance_url="", api_key=""))
-    log = FakeRichLog()
+    log = FakeChatLog()
     input_widget = FakeInput()
     saved: dict[str, str] = {}
 
@@ -108,7 +147,7 @@ async def test_startup_falls_back_to_default_host_when_prompt_returns_empty(
     async def fake_push_screen_wait(screen: object) -> str:
         return ""
 
-    async def fake_fetch_capabilities(log_widget: FakeRichLog) -> tuple[None, bool]:
+    async def fake_fetch_capabilities(log_widget: FakeChatLog) -> tuple[None, bool]:
         return None, False
 
     monkeypatch.setattr(app, "push_screen_wait", fake_push_screen_wait)
@@ -130,7 +169,7 @@ async def test_startup_persists_host_and_api_key_only_when_login_save_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentZeroCLI(config=CLIConfig(instance_url="", api_key=""))
-    log = FakeRichLog()
+    log = FakeChatLog()
     input_widget = FakeInput()
     saved: dict[str, str] = {}
 
@@ -143,7 +182,7 @@ async def test_startup_persists_host_and_api_key_only_when_login_save_checked(
             return LoginResult(api_key="api-key-123", save_credentials=True)
         raise AssertionError(f"Unexpected screen: {screen!r}")
 
-    async def fake_fetch_capabilities(log_widget: FakeRichLog) -> tuple[dict[str, object], bool]:
+    async def fake_fetch_capabilities(log_widget: FakeChatLog) -> tuple[dict[str, object], bool]:
         return {
             "auth": ["api_key", "login"],
             "protocol": "a0-connector.v1",
@@ -188,7 +227,7 @@ async def test_startup_keeps_host_and_api_key_ephemeral_when_login_save_unchecke
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentZeroCLI(config=CLIConfig(instance_url="", api_key=""))
-    log = FakeRichLog()
+    log = FakeChatLog()
     input_widget = FakeInput()
     saved: dict[str, str] = {}
 
@@ -201,7 +240,7 @@ async def test_startup_keeps_host_and_api_key_ephemeral_when_login_save_unchecke
             return LoginResult(api_key="api-key-123", save_credentials=False)
         raise AssertionError(f"Unexpected screen: {screen!r}")
 
-    async def fake_fetch_capabilities(log_widget: FakeRichLog) -> tuple[dict[str, object], bool]:
+    async def fake_fetch_capabilities(log_widget: FakeChatLog) -> tuple[dict[str, object], bool]:
         return {
             "auth": ["api_key", "login"],
             "protocol": "a0-connector.v1",
@@ -267,8 +306,9 @@ def test_context_snapshot_renders_events_for_current_context(dummy_app: DummyAge
 
     assert dummy_app.rendered_events == [
         {"event": "assistant_message", "data": {"text": "Hello"}},
-        {"event": "status", "data": {"text": "Done"}},
     ]
+    # The status event is rendered as a dim status line, not via _render_connector_event
+    assert len(dummy_app._test_log.sequences) > 0
 
 
 def test_context_event_ignores_other_contexts(dummy_app: DummyAgentZeroCLI) -> None:
@@ -297,6 +337,30 @@ def test_context_complete_reenables_input(dummy_app: DummyAgentZeroCLI) -> None:
     assert dummy_app.agent_active is False
     assert dummy_app._test_input.disabled is False
     assert dummy_app._test_input.focused is True
+
+
+def test_status_lines_grouped_by_category(dummy_app: DummyAgentZeroCLI) -> None:
+    """Same tool category should update one line; different category adds a new line."""
+    dummy_app.current_context = "ctx-1"
+    dummy_app.agent_active = True
+    log = dummy_app._test_log
+
+    dummy_app._handle_context_event(
+        {"context_id": "ctx-1", "event": "status", "data": {"text": "First"}, "sequence": 1}
+    )
+    status_sequences_after_first = len(log.sequences)
+
+    dummy_app._handle_context_event(
+        {"context_id": "ctx-1", "event": "status", "data": {"text": "Second"}, "sequence": 1}
+    )
+    assert len(log.sequences) == status_sequences_after_first
+    assert log._active_label == "Thinking"
+
+    dummy_app._handle_context_event(
+        {"context_id": "ctx-1", "event": "tool_start", "data": {"heading": "web_search"}, "sequence": 2}
+    )
+    assert log._active_label == "Using tool"
+    assert len(log.sequences) > status_sequences_after_first
 
 
 def test_handle_file_op_returns_error_for_unknown_operation(dummy_app: DummyAgentZeroCLI) -> None:
@@ -350,3 +414,30 @@ async def test_chat_list_uses_safe_ids_and_maps_back_to_context() -> None:
         list_view = screen.query_one(ListView)
         nodes = list(getattr(list_view, "_nodes", list_view.children))
         assert len(nodes) == len(contexts)
+
+
+def test_streaming_response_not_truncated(dummy_app: DummyAgentZeroCLI) -> None:
+    """Streamed chunks should all be rendered; post-response status should be dropped."""
+    dummy_app.current_context = "ctx-1"
+
+    # Chunk 1
+    dummy_app._handle_context_event(
+        {"context_id": "ctx-1", "event": "assistant_message", "data": {"text": "Hel"}, "sequence": 10}
+    )
+    assert dummy_app._response_delivered is True
+    assert len(dummy_app.rendered_events) == 1
+    assert dummy_app.rendered_events[0]["data"]["text"] == "Hel"
+
+    # Chunk 2 - Should NOT be dropped
+    dummy_app._handle_context_event(
+        {"context_id": "ctx-1", "event": "assistant_message", "data": {"text": "Hello!"}, "sequence": 10}
+    )
+    assert len(dummy_app.rendered_events) == 2
+    assert dummy_app.rendered_events[1]["data"]["text"] == "Hello!"
+
+    # Status after response - SHOULD be dropped
+    dummy_app._handle_context_event(
+        {"context_id": "ctx-1", "event": "status", "data": {"text": "Thinking..."}, "sequence": 11}
+    )
+    # sequence 11 should NOT be in the log sequences if it was dropped
+    assert 11 not in dummy_app._test_log.sequences

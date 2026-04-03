@@ -6,47 +6,27 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
-from textual.widgets import Footer, RichLog, Static
+from textual.widgets import Footer
+from rich.panel import Panel
+from rich.align import Align
+from agent_zero_cli.widgets.chat_log import ChatLog
 from rich.markdown import Markdown
 
 from agent_zero_cli.client import A0Client, A0ConnectorPluginMissingError
 from agent_zero_cli.config import CLIConfig, load_config, save_env
+from agent_zero_cli.rendering import (
+    _EVENT_CATEGORY,
+    _STATUS_LABEL,
+    extract_detail,
+    render_connector_event,
+)
 from agent_zero_cli.screens.chat_list import ChatListScreen
 from agent_zero_cli.screens.host_input import HostInputScreen
 from agent_zero_cli.screens.login import LoginResult, LoginScreen
 from agent_zero_cli.widgets.chat_input import ChatInput
+from agent_zero_cli.widgets.connection_status import ConnectionStatus
+from agent_zero_cli.widgets.shimmer import build_dim_status
 
-
-_EVENT_CATEGORY: dict[str, str] = {
-    "user_message": "user",
-    "assistant_message": "response",
-    "assistant_delta": "response",
-    "tool_start": "tool",
-    "tool_output": "tool",
-    "tool_end": "tool",
-    "code_start": "code",
-    "code_output": "code",
-    "warning": "warning",
-    "error": "error",
-    "status": "info",
-    "message_complete": "info",
-    "context_updated": "info",
-}
-
-# Human-readable activity labels per event type.
-# "user_message" intentionally omitted — no indicator shown when sending.
-# "Responding" intentionally omitted — the chat log response covers that.
-_STATUS_LABEL: dict[str, str] = {
-    "assistant_message": "Responding",
-    "assistant_delta": "Responding",
-    "tool_start": "Using tool",
-    "tool_output": "Using tool",
-    "tool_end": "Using tool",
-    "code_start": "Running code",
-    "code_output": "Running code",
-    "status": "Thinking",
-    "context_updated": "Updating memory",
-}
 
 _PROTOCOL_VERSION = "a0-connector.v1"
 _WS_NAMESPACE = "/ws"
@@ -89,12 +69,12 @@ class AgentZeroCLI(App):
             api_key=self.config.api_key,
         )
         self.current_context: str | None = None
-        self._last_status_label: str = ""
-        self._last_logged_label: str = ""
+        self._sys_message_seq: int = -100
         self._response_delivered: bool = False
 
     def compose(self) -> ComposeResult:
-        yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
+        yield ConnectionStatus(id="connection-status")
+        yield ChatLog(id="chat-log")
         yield ChatInput(id="message-input")
         yield Footer()
 
@@ -102,51 +82,34 @@ class AgentZeroCLI(App):
         input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = True
         input_widget.focus()
+        
+        log = self.query_one("#chat-log", ChatLog)
+        self.set_interval(0.1, log.advance_shimmer)
         self.run_worker(self._startup(), exclusive=True, name="startup")
 
     def _set_activity(self, label: str, detail: str = "") -> None:
         """Show agent progress inside the chat input placeholder (WebUI-style)."""
-        self._last_status_label = label
         self.query_one("#message-input", ChatInput).set_activity(label, detail)
 
     def _set_idle(self) -> None:
         """Restore the normal chat input placeholder."""
-        self._last_status_label = ""
         self.query_one("#message-input", ChatInput).set_idle()
+        try:
+            log = self.query_one("#chat-log", ChatLog)
+            log.dim_active_status()
+        except Exception:
+            pass
 
-    @staticmethod
-    def _extract_detail(event_type: str, data: dict[str, Any]) -> str:
-        """Extract a short human-readable detail string from event data."""
-        heading = (data.get("heading") or "").strip()
-        text = (data.get("text") or "").strip()
 
-        if event_type in ("tool_start", "tool_output", "tool_end"):
-            # heading is the tool name
-            return heading[:40] if heading else ""
 
-        if event_type in ("code_start", "code_output"):
-            return heading[:40] if heading else ""
 
-        if event_type == "context_updated":
-            return "memory"
-
-        if event_type == "status":
-            # text may be a JSON blob or a sentence — take first sentence only
-            raw = heading or text
-            # strip obvious JSON artifacts
-            if raw.startswith("{") or raw.startswith("["):
-                return ""
-            first = raw.split(".")[0].split("\n")[0].strip()
-            return first[:50] if first else ""
-
-        return ""
 
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
 
     async def _startup(self) -> None:
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         input_widget = self.query_one("#message-input", ChatInput)
 
         # --- Step 1: Resolve host URL ---
@@ -157,7 +120,7 @@ class AgentZeroCLI(App):
             self.config.instance_url = host_url
             self.client.base_url = host_url.rstrip("/")
 
-        log.write("[dim]Connecting to Agent Zero...[/dim]")
+        self.query_one("#connection-status", ConnectionStatus).url = self.config.instance_url
 
         # --- Step 2: Probe capabilities ---
         capabilities, plugin_missing = await self._fetch_capabilities(log)
@@ -247,8 +210,10 @@ class AgentZeroCLI(App):
             input_widget.disabled = True
             return
 
-        log.write("[green]Connected to Agent Zero.[/green]")
         input_widget.disabled = False
+        status_widget = self.query_one("#connection-status", ConnectionStatus)
+        status_widget.status = "connected"
+        status_widget.url = self.config.instance_url
 
     async def _fetch_capabilities(
         self, log: RichLog
@@ -292,6 +257,11 @@ class AgentZeroCLI(App):
 
     def _set_connected(self, value: bool) -> None:
         self.connected = value
+        try:
+            status_widget = self.query_one("#connection-status", ConnectionStatus)
+            status_widget.status = "connected" if value else "disconnected"
+        except Exception:
+            pass
 
     def _run_on_ui(self, func: Any, *args: Any) -> None:
         app_loop = getattr(self, "loop", None)
@@ -310,10 +280,22 @@ class AgentZeroCLI(App):
         if context_id != self.current_context:
             return
 
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         events = data.get("events", [])
+
         for event in events:
-            self._render_connector_event(log, event)
+            event_type = event.get("event", "")
+            category = _EVENT_CATEGORY.get(event_type, "info")
+
+            if category in ("user", "response", "warning", "error"):
+                render_connector_event(log, event)
+            else:
+                label = _STATUS_LABEL.get(event_type)
+                if label:
+                    event_data = event.get("data", {})
+                    detail = extract_detail(event_type, event_data)
+                    seq = event.get("sequence", -1)
+                    log.append_or_update(seq, build_dim_status(label, detail))
 
     def _handle_context_event(self, data: dict[str, Any]) -> None:
         """Handle a single streaming event from the agent."""
@@ -323,7 +305,7 @@ class AgentZeroCLI(App):
 
         event_type = data.get("event", "")
         category = _EVENT_CATEGORY.get(event_type, "info")
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
 
         # Once the final response has been delivered, silently drop all
         # post-response events (memory writes, status pings, etc.) except
@@ -348,20 +330,16 @@ class AgentZeroCLI(App):
             render_connector_event(log, data)
             return
 
-        # Update activity bar and log each distinct label once
+        # Update inline status line and input placeholder.
         label = _STATUS_LABEL.get(event_type)
         if label:
             event_data = data.get("data", {})
-            detail = self._extract_detail(event_type, event_data)
+            detail = extract_detail(event_type, event_data)
             self._set_activity(label, detail)
-            # Log once per distinct label+detail combo
-            log_key = f"{label}:{detail}"
-            if log_key != self._last_logged_label:
-                detail_part = f" [{detail}]" if detail else ""
-                log.write(f"[dim]● {label}{detail_part}[/dim]")
-                self._last_logged_label = log_key
+            log.set_active_status(data.get("sequence", -1), label, detail)
 
-        self._render_connector_event(log, data)
+        if category in ("warning", "error", "user"):
+            render_connector_event(log, data)
 
     def _handle_context_complete(self, data: dict[str, Any]) -> None:
         """Handle agent completion -- re-enable input."""
@@ -370,16 +348,14 @@ class AgentZeroCLI(App):
             return
 
         self.agent_active = False
-        self._response_delivered = False
         input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = False
         input_widget.focus()
         self._set_idle()
-        self._last_logged_label = ""
 
     def _handle_connector_error(self, data: dict[str, Any]) -> None:
         """Handle error events from the connector."""
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         code = data.get("code", "ERROR")
         message = data.get("message", "Unknown error")
         log.write(f"[red]{code}: {message}[/red]")
@@ -473,39 +449,7 @@ class AgentZeroCLI(App):
 
         return {"op_id": op_id, "ok": True, "result": {"path": path}}
 
-    # ------------------------------------------------------------------
-    # Event rendering
-    # ------------------------------------------------------------------
 
-    def _render_connector_event(self, log: RichLog, event: dict[str, Any]) -> None:
-        """Render a connector event to the chat log."""
-        event_type = event.get("event", "")
-        data = event.get("data", {})
-        text = data.get("text", "")
-        heading = data.get("heading", "")
-
-        category = _EVENT_CATEGORY.get(event_type, "info")
-
-        if category == "user":
-            if text:
-                log.write(f"[bold cyan]You:[/bold cyan] {text}")
-            return
-
-        if category == "response":
-            log.write("[bold green]Agent Zero:[/bold green]")
-            if text:
-                log.write(Markdown(text))
-            return
-
-        if category == "warning":
-            msg = f"{heading}: {text}" if heading else text
-            log.write(f"[yellow]{msg}[/yellow]")
-            return
-
-        if category == "error":
-            msg = f"{heading}: {text}" if heading else text
-            log.write(f"[red]{msg}[/red]")
-            return
 
     # ------------------------------------------------------------------
     # Message submission
@@ -521,13 +465,14 @@ class AgentZeroCLI(App):
             await self._handle_command(text)
             return
 
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         if not self.current_context:
             log.write("[red]No active chat context.[/red]")
             return
 
         event.input.disabled = True
         self.agent_active = True
+        self._response_delivered = False
         try:
             await self.client.send_message(text, self.current_context)
         except Exception as exc:
@@ -549,7 +494,7 @@ class AgentZeroCLI(App):
         }
         handler = handlers.get(command)
         if handler is None:
-            log = self.query_one("#chat-log", RichLog)
+            log = self.query_one("#chat-log", ChatLog)
             log.write(
                 f"[yellow]Unknown command: {command}. Type /help for available commands.[/yellow]"
             )
@@ -560,7 +505,7 @@ class AgentZeroCLI(App):
         await handler()
 
     async def _cmd_chats(self) -> None:
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         try:
             contexts = await self.client.list_chats()
         except Exception as exc:
@@ -581,18 +526,16 @@ class AgentZeroCLI(App):
         self._response_delivered = False
         log.clear()
         self._set_idle()
-        self._last_logged_label = ""
         await self.client.subscribe_context(result, from_seq=0)
 
     async def _cmd_new(self) -> None:
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         if self.current_context:
             await self.client.unsubscribe_context(self.current_context)
         self.current_context = await self.client.create_chat()
         self._response_delivered = False
         log.clear()
         self._set_idle()
-        self._last_logged_label = ""
         await self.client.subscribe_context(self.current_context)
 
     async def _cmd_exit(self) -> None:
@@ -600,7 +543,7 @@ class AgentZeroCLI(App):
         self.exit()
 
     async def _cmd_help(self) -> None:
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         log.write("[bold]Available commands:[/bold]")
         log.write("/chats - List previous chats")
         log.write("/new - Start a new chat")
@@ -613,7 +556,7 @@ class AgentZeroCLI(App):
 
     async def action_clear_chat(self) -> None:
         """F5 - Clear the chat log display."""
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         log.clear()
 
     async def action_list_chats(self) -> None:
@@ -624,10 +567,11 @@ class AgentZeroCLI(App):
         """F7 - Send a nudge to the agent to continue."""
         if not self.current_context or not self.connected or self.agent_active:
             return
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = True
         self.agent_active = True
+        self._response_delivered = False
         try:
             await self.client.send_message(".", self.current_context)
         except Exception as exc:
@@ -639,7 +583,7 @@ class AgentZeroCLI(App):
         """F8 - Toggle pause on the agent (interrupt current run)."""
         if not self.connected:
             return
-        log = self.query_one("#chat-log", RichLog)
+        log = self.query_one("#chat-log", ChatLog)
         if not hasattr(self.client, "pause_agent"):
             log.write("[yellow]Pause not supported by this connector version.[/yellow]")
             return

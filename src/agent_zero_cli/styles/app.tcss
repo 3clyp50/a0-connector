@@ -1,34 +1,46 @@
 Screen {
-    background: #0b1119;
+    background: #17181a;
+    layers: base status;
 }
 
 #chat-log {
     height: 1fr;
-    padding: 1 1 0 1;
-    background: #0f141b;
+    padding: 1 2 0 1;
+    background: #17181a;
     overflow-x: hidden;
-    border-bottom: solid #0f6db8;
+    scrollbar-size: 1 1;
 }
 
 #message-input {
     margin-top: 0;
     margin-bottom: 0;
-    border: round #0f6db8;
-    background: #0f141b;
+    border: round #555555;
+    background: #17181a;
     padding: 0 1;
 }
 
 /* Subtle highlight while progress placeholder is shown (see WebUI .progress-active). */
 #message-input.progress-active {
-    border: round #1886c9;
+    border: round #777777;
 }
 
 #message-input:focus {
-    border: round #00b4ff;
+    border: round #777777;
+}
+
+#connection-status {
+    layer: status;
+    width: 100%;
+    height: 1;
+    content-align: right top;
+    padding-right: 2;
+    background: transparent;
+    color: #444444;
+    text-opacity: 60%;
 }
 
 Footer {
-    background: #101a24;
+    background: #17181a;
 }
 
 HostInputScreen {
@@ -99,16 +111,15 @@ LoginScreen {
 }
 
 ChatListScreen {
-    align: center middle;
+    align: left top;
 }
 
 #chat-list-panel {
-    width: 80%;
-    min-width: 40;
-    max-height: 70%;
-    border: solid $primary;
+    width: 100%;
+    min-width: 100%;
+    max-height: 100%;
     padding: 1;
-    background: $panel;
+    scrollbar-size: 1 1;
 }
 
 #chat-list-title {
