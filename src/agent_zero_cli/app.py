@@ -5,6 +5,7 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.theme import Theme
 from textual.reactive import reactive
 from textual.widgets import Footer
 from rich.panel import Panel
@@ -63,6 +64,17 @@ class AgentZeroCLI(App):
 
     def __init__(self, config: CLIConfig | None = None) -> None:
         super().__init__()
+        self.register_theme(
+            Theme(
+                name="a0-dark",
+                primary="#0178D4",
+                secondary="#004578",
+                accent="#00b4ff",
+                foreground="#e0e0e0",
+                dark=True,
+            )
+        )
+        self.theme = "a0-dark"
         self.config = config or load_config()
         self.client = A0Client(
             self.config.instance_url or HostInputScreen.DEFAULT_HOST,

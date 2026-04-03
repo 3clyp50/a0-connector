@@ -57,6 +57,8 @@ class ChatLog(VerticalScroll):
             widget = Static(renderable)
             self._seq_to_widget[sequence] = widget
             self.mount(widget)
+            if scroll:
+                widget.scroll_visible(animate=False)
 
     def set_active_status(self, seq: int, label: str, detail: str) -> None:
         """Set a new active status line, dimming the previous one if necessary."""
