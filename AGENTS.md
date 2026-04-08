@@ -1,6 +1,6 @@
 # Agent Zero Connector — AGENTS.md
 
-[Generated: 2026-04-03]
+[Generated: 2026-04-08]
 
 ## Quick Reference
 
@@ -258,6 +258,16 @@ self._set_idle()                                  # correct
 # Don't reach into the widget directly from outside _set_activity/_set_idle
 self.query_one("#message-input", ChatInput).set_activity(...)  # avoid
 ```
+
+### Textual `Select` guardrails
+
+Textual `Select` widgets can emit duplicate `Changed` events while an overlay
+closes or when the widget is refreshed programmatically. For preset/model
+selectors, treat a change as user intent only when the widget is not busy, the
+event is not suppressed, and the value differs from the last committed
+selection. If you refresh state programmatically, update the cached selection
+inside the suppression window so the handler does not bounce back into another
+render loop.
 
 ### Test stubs (`tests/test_app.py`)
 

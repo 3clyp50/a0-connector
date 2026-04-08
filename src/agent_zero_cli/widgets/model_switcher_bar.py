@@ -116,6 +116,7 @@ class ModelSwitcherBar(Horizontal):
         self._switch_allowed = False
         self._option_count = 1
         self._suppress_events = False
+        self._selected_value = ""
         self.display = False
 
     def compose(self) -> ComposeResult:
@@ -127,6 +128,7 @@ class ModelSwitcherBar(Horizontal):
         self._busy = False
         self._switch_allowed = False
         self._option_count = 1
+        self._selected_value = ""
         self._suppress_events = True
         try:
             self._summary.update("")
@@ -165,6 +167,7 @@ class ModelSwitcherBar(Horizontal):
         try:
             self._preset.set_options(options)
             self._preset.value = current_value
+            self._selected_value = current_value
         finally:
             self._suppress_events = False
 
@@ -186,9 +189,14 @@ class ModelSwitcherBar(Horizontal):
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._suppress_events or event.select.id != "model-switcher-preset":
             return
+        if self._busy:
+            return
         value = str(event.value)
         if value == _CUSTOM_OVERRIDE_VALUE:
             return
+        if value == self._selected_value:
+            return
+        self._selected_value = value
         self.post_message(self.PresetChanged(value=value, bar=self))
 
 
