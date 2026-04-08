@@ -25,13 +25,6 @@ class Nudge(connector_base.ProtectedConnectorApiHandler):
                 mimetype="application/json",
             )
 
-        if context.is_running():
-            return Response(
-                response='{"error": "Context is already running"}',
-                status=409,
-                mimetype="application/json",
-            )
-
         context.nudge()
         message = "Process reset, agent nudged."
         context.log.log(type="info", content=message)

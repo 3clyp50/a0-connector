@@ -442,6 +442,23 @@ def test_context_snapshot_shows_intro_before_first_message(dummy_app: DummyAgent
     assert log.intro_visible is True
 
 
+def test_context_event_renders_info_messages_as_standalone_entries(dummy_app: DummyAgentZeroCLI) -> None:
+    dummy_app.connected = True
+    dummy_app.current_context = "ctx-1"
+    dummy_app.current_context_has_messages = True
+
+    dummy_app._handle_context_event(
+        {
+            "context_id": "ctx-1",
+            "event": "info",
+            "sequence": 3,
+            "data": {"text": "Process reset, agent nudged."},
+        }
+    )
+
+    assert dummy_app.rendered_events[-1]["event"] == "info"
+
+
 async def test_clear_chat_does_not_return_to_welcome(dummy_app: DummyAgentZeroCLI) -> None:
     dummy_app.connected = True
     dummy_app.current_context = "ctx-1"
@@ -573,6 +590,18 @@ def test_nudge_requires_advertised_feature(dummy_app: DummyAgentZeroCLI) -> None
 
     assert availability.available is False
     assert "nudge" in (availability.reason or "")
+
+
+def test_nudge_is_available_during_active_run(dummy_app: DummyAgentZeroCLI) -> None:
+    dummy_app.connected = True
+    dummy_app.current_context = "ctx-1"
+    dummy_app.current_context_has_messages = False
+    dummy_app.agent_active = True
+    dummy_app.connector_features = {"nudge"}
+
+    availability = dummy_app._nudge_availability()
+
+    assert availability.available is True
 
 
 async def test_pause_command_releases_input_and_latches_paused_state(

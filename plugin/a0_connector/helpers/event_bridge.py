@@ -18,6 +18,7 @@ EVENT_CODE_START = "code_start"
 EVENT_CODE_OUTPUT = "code_output"
 EVENT_WARNING = "warning"
 EVENT_ERROR = "error"
+EVENT_INFO = "info"
 EVENT_STATUS = "status"
 EVENT_MESSAGE_COMPLETE = "message_complete"
 EVENT_CONTEXT_UPDATED = "context_updated"
@@ -31,7 +32,7 @@ _LOG_TYPE_MAP: dict[str, str] = {
     "code_output": EVENT_CODE_OUTPUT,
     "error": EVENT_ERROR,
     "hint": EVENT_STATUS,
-    "info": EVENT_STATUS,
+    "info": EVENT_INFO,
     "input": EVENT_USER_MESSAGE,
     "mcp": EVENT_TOOL_START,
     "progress": EVENT_STATUS,

@@ -559,10 +559,6 @@ class AgentZeroCLI(App):
             return base
         if not self.current_context:
             return CommandAvailability(False, "Open or create a chat context first.")
-        if not self.current_context_has_messages:
-            return CommandAvailability(False, "Start a conversation before nudging it forward.")
-        if self.agent_active:
-            return CommandAvailability(False, "Wait for the current run to finish before nudging.")
         return CommandAvailability(True)
 
     def _model_presets_availability(self) -> CommandAvailability:
@@ -873,7 +869,7 @@ class AgentZeroCLI(App):
             if self._message_flag_for_event(event_type):
                 self._mark_context_has_messages()
 
-            if category in ("user", "response", "warning", "error", "code"):
+            if category in ("user", "response", "warning", "error", "code", "info"):
                 self._show_chat_intro(log, category)
                 render_connector_event(log, event)
             else:
@@ -899,7 +895,7 @@ class AgentZeroCLI(App):
         log = self.query_one("#chat-log", ChatLog)
 
         if self._response_delivered and category != "response":
-            if category in ("error", "warning"):
+            if category in ("error", "warning", "info"):
                 render_connector_event(log, data)
             return
 
@@ -925,7 +921,7 @@ class AgentZeroCLI(App):
             self._set_activity(label, detail)
             log.set_active_status(data.get("sequence", -1), label, detail)
 
-        if category in ("warning", "error", "user", "code"):
+        if category in ("warning", "error", "user", "code", "info"):
             self._show_chat_intro(log, category)
             if render_connector_event(log, data):
                 if log._active_seq == data.get("sequence"):

@@ -612,15 +612,15 @@ async def test_nudge_agent_normalizes_http_failure() -> None:
     client = A0Client("http://localhost:5080", api_key="secret")
     client.http = Mock()
     client.http.post = AsyncMock(
-        return_value=FakeResponse(status_code=409, text="Context is already running")
+        return_value=FakeResponse(status_code=404, text="Context not found")
     )
 
     result = await client.nudge_agent("ctx-1")
 
     assert result == {
         "ok": False,
-        "message": "Context is already running",
-        "status_code": 409,
+        "message": "Context not found",
+        "status_code": 404,
     }
 
 

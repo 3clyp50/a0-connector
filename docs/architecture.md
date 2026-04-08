@@ -90,7 +90,8 @@ All events are `connector_`-prefixed to avoid collisions on the shared `/ws` nam
 | `code_exe`, `code_output` | `code_output` |
 | `error` | `error` |
 | `warning` | `warning` |
-| `agent`, `hint`, `info`, `progress`, `subagent`, `util` | `status` |
+| `agent`, `hint`, `progress`, `subagent`, `util` | `status` |
+| `info` | `info` |
 
 ## Remote file operations
 
