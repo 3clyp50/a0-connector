@@ -36,8 +36,6 @@ from agent_zero_cli.widgets import (
     ConnectionStatus,
     DynamicFooter,
     ModelSwitcherBar,
-    SlashCommand,
-    SlashCommandMenu,
     SplashAction,
     SplashState,
     SplashView,
@@ -112,13 +110,13 @@ class AgentZeroCLI(App):
         self._last_remote_tree_hash = ""
         self._model_switch_allowed = False
         self._pause_latched = False
+        self._slash_palette_query: str | None = None
 
     def compose(self) -> ComposeResult:
         yield ConnectionStatus(id="connection-status")
         with ContentSwitcher(initial="splash-view", id="body-switcher"):
             yield SplashView()
             yield ChatLog(id="chat-log")
-        yield SlashCommandMenu()
         yield ModelSwitcherBar(id="model-switcher-bar")
         yield ChatInput(id="message-input")
         yield DynamicFooter()
@@ -126,8 +124,6 @@ class AgentZeroCLI(App):
     async def on_mount(self) -> None:
         input_widget = self.query_one("#message-input", ChatInput)
         input_widget.disabled = True
-        slash_menu = self.query_one("#slash-menu", SlashCommandMenu)
-        slash_menu.display = False
         self.query_one("#model-switcher-bar", ModelSwitcherBar).clear()
         self.query_one("#splash-view", SplashView).set_state(self._splash_state)
 
@@ -139,67 +135,22 @@ class AgentZeroCLI(App):
         self.run_worker(self._startup(), exclusive=True, name="startup")
 
     def get_system_commands(self, screen) -> Iterable[SystemCommand]:
-        help_panel_visible = False
-        try:
-            help_panel_visible = bool(screen.query("HelpPanel"))
-        except Exception:
-            help_panel_visible = False
-
-        keys_help = (
-            "Hide the keys and widget help panel"
-            if help_panel_visible
-            else "Show help for the focused widget and a summary of available keys"
-        )
-        keys_callback = self.action_hide_help_panel if help_panel_visible else self.action_show_help_panel
-
-        yield SystemCommand(
-            "New Chat",
-            "Create a brand-new empty chat context.",
-            lambda: self.run_worker(self._dispatch_command("/new"), exclusive=True, name="palette-new-chat"),
-        )
-        yield SystemCommand(
-            "Chats",
-            "List previous chats and switch contexts.",
-            lambda: self.run_worker(self._dispatch_command("/chats"), exclusive=True, name="palette-chats"),
-        )
-        yield from self._model_preset_system_commands()
-        yield SystemCommand("Keys", keys_help, keys_callback)
-        yield SystemCommand(
-            "Help",
-            "Show the commands available in this shell.",
-            lambda: self.run_worker(self._dispatch_command("/help"), exclusive=True, name="palette-help"),
-        )
-        yield SystemCommand(
-            "Quit",
-            "Disconnect and exit the CLI.",
-            lambda: self.run_worker(self.action_quit(), exclusive=True, name="palette-quit"),
-        )
-
-    def _model_preset_system_commands(self) -> Iterable[SystemCommand]:
-        availability = self._model_presets_availability()
-        if not availability.available:
-            return ()
-        return (
-            SystemCommand(
-                "Model Presets",
-                "Open preset picker with Main/Utility model details.",
-                lambda: self.run_worker(
-                    self._cmd_model_presets(),
+        del screen  # unused; provider iterates App-level ordered commands.
+        for spec, _ in self._iter_ui_commands():
+            command = spec.canonical_name
+            worker_name = f"palette-{command.lstrip('/').replace('/', '-')}"
+            yield SystemCommand(
+                command,
+                spec.description,
+                lambda command=command, worker_name=worker_name: self.run_worker(
+                    self._dispatch_command(command),
                     exclusive=True,
-                    name="palette-model-presets",
+                    name=worker_name,
                 ),
-            ),
-        )
+            )
 
     def _build_command_registry(self) -> tuple[CommandSpec, ...]:
         return (
-            CommandSpec(
-                "/help",
-                (),
-                "Show the commands available in this shell.",
-                lambda app: CommandAvailability(True),
-                lambda app: app._cmd_help(),
-            ),
             CommandSpec(
                 "/new",
                 (),
@@ -222,29 +173,65 @@ class AgentZeroCLI(App):
                 lambda app: app._cmd_compact(),
             ),
             CommandSpec(
-                "/pause",
+                "/presets",
                 (),
-                "Pause the current run when pause support is available.",
-                lambda app: app._pause_availability(),
-                lambda app: app._cmd_pause(),
+                "Open preset picker with Main/Utility model details.",
+                lambda app: app._model_presets_availability(),
+                lambda app: app._cmd_model_presets(),
             ),
             CommandSpec(
-                "/nudge",
+                "/keys",
                 (),
-                "Send a continuation nudge to the current context.",
-                lambda app: app._nudge_availability(),
-                lambda app: app._cmd_nudge(),
+                "Show or hide key and widget help.",
+                lambda app: CommandAvailability(True),
+                lambda app: app._cmd_keys(),
+            ),
+            CommandSpec(
+                "/help",
+                (),
+                "Show the commands available in this shell.",
+                lambda app: CommandAvailability(True),
+                lambda app: app._cmd_help(),
+            ),
+            CommandSpec(
+                "/quit",
+                (),
+                "Disconnect and exit the CLI.",
+                lambda app: CommandAvailability(True),
+                lambda app: app._cmd_quit(),
             ),
         )
 
     def action_command_palette(self) -> None:
-        if self.use_command_palette and not CommandPalette.is_open(self):
-            self.push_screen(
-                AgentCommandPalette(
-                    providers=[OrderedSystemCommandsProvider],
-                    id="--command-palette",
-                )
+        self._open_command_palette()
+
+    def _is_command_palette_open(self) -> bool:
+        try:
+            return CommandPalette.is_open(self)
+        except Exception:
+            return False
+
+    def _open_command_palette(self, *, initial_query: str = "", from_slash: bool = False) -> None:
+        if not self.use_command_palette or self._is_command_palette_open():
+            return
+
+        self._slash_palette_query = initial_query if from_slash else None
+        self.push_screen(
+            AgentCommandPalette(
+                providers=[OrderedSystemCommandsProvider],
+                id="--command-palette",
+                initial_query=initial_query,
             )
+        )
+
+    def _iter_ui_commands(self) -> tuple[tuple[CommandSpec, CommandAvailability], ...]:
+        rows: list[tuple[CommandSpec, CommandAvailability]] = []
+        for spec in self._command_registry:
+            availability = spec.availability(self)
+            if spec.canonical_name == "/presets" and not availability.available:
+                continue
+            rows.append((spec, availability))
+        return tuple(rows)
 
     def _sync_connection_status(self, status: str, url: str | None = None) -> None:
         widget = self.query_one("#connection-status", ConnectionStatus)
@@ -573,25 +560,15 @@ class AgentZeroCLI(App):
         return CommandAvailability(True)
 
     def _welcome_actions(self) -> tuple[SplashAction, ...]:
-        def action(key: str, title: str, description: str, availability: CommandAvailability) -> SplashAction:
-            return SplashAction(
-                key=key,
-                title=title,
-                description=description,
+        return tuple(
+            SplashAction(
+                key=spec.canonical_name,
+                title=spec.canonical_name,
+                description=spec.description,
                 enabled=availability.available,
                 disabled_reason="" if availability.available else (availability.reason or ""),
             )
-
-        return (
-            action("chats", "Chats", "Open chat history.", self._require_features("chats_list")),
-            action("compact", "Compact", "Compact this chat.", self._compact_availability()),
-            action(
-                "pause",
-                "Resume" if self._pause_latched else "Pause",
-                "Resume the paused run." if self._pause_latched else "Pause the active run.",
-                self._pause_toggle_availability(),
-            ),
-            action("nudge", "Nudge", "Continue the current run.", self._nudge_availability()),
+            for spec, availability in self._iter_ui_commands()
         )
 
     async def _startup(self) -> None:
@@ -648,7 +625,7 @@ class AgentZeroCLI(App):
         self.client.api_key = self.config.api_key
         self._sync_connection_status("connecting", normalized_host)
         self.query_one("#message-input", ChatInput).disabled = True
-        self._close_slash_menu()
+        self._slash_palette_query = None
         self._set_splash_stage(
             "connecting",
             message="Probing connector capabilities...",
@@ -1011,43 +988,6 @@ class AgentZeroCLI(App):
             return None
         return token.lower()
 
-    def _slash_matches(self, query: str) -> list[SlashCommand]:
-        matches: list[SlashCommand] = []
-        for spec in self._command_registry:
-            availability = spec.availability(self)
-            if not availability.available:
-                continue
-            names = spec.names()
-            if query != "/" and not any(name.startswith(query) for name in names):
-                continue
-            matches.append(
-                SlashCommand(
-                    canonical=spec.canonical_name,
-                    aliases=spec.aliases,
-                    description=spec.description,
-                )
-            )
-        return matches
-
-    def _close_slash_menu(self) -> None:
-        menu = self.query_one("#slash-menu", SlashCommandMenu)
-        menu.display = False
-        self.query_one("#message-input", ChatInput).set_slash_menu_active(False)
-
-    def _open_slash_menu(self, commands: list[SlashCommand]) -> None:
-        menu = self.query_one("#slash-menu", SlashCommandMenu)
-        menu.display = True
-        menu.set_visible_commands(commands)
-        self.query_one("#message-input", ChatInput).set_slash_menu_active(True)
-
-    def _insert_slash_command(self, command: SlashCommand | None) -> None:
-        if command is None:
-            return
-        input_widget = self.query_one("#message-input", ChatInput)
-        input_widget.value = f"{command.canonical} "
-        input_widget.focus()
-        self._close_slash_menu()
-
     async def _dispatch_command(self, text: str) -> None:
         token = text.split()[0].lower()
         spec = self._command_lookup.get(token)
@@ -1066,7 +1006,7 @@ class AgentZeroCLI(App):
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.value.strip()
         if not text:
-            self._close_slash_menu()
+            self._slash_palette_query = None
             return
 
         if text.startswith("/"):
@@ -1096,37 +1036,23 @@ class AgentZeroCLI(App):
     def on_chat_input_value_changed(self, event: ChatInput.ValueChanged) -> None:
         query = self._slash_query(event.value)
         if query is None:
-            self._close_slash_menu()
             return
 
-        self._open_slash_menu(self._slash_matches(query))
+        self._open_command_palette(initial_query=query, from_slash=True)
 
-    async def on_chat_input_slash_navigation(self, event: ChatInput.SlashNavigation) -> None:
-        menu = self.query_one("#slash-menu", SlashCommandMenu)
-        if not menu.display:
+    def on_command_palette_closed(self, event: CommandPalette.Closed) -> None:
+        del event
+        query = self._slash_palette_query
+        self._slash_palette_query = None
+        if query is None:
             return
 
-        if event.key == "up":
-            menu.action_cursor_up()
+        try:
+            input_widget = self.query_one("#message-input", ChatInput)
+        except Exception:
             return
-        if event.key == "down":
-            menu.action_cursor_down()
-            return
-        if event.key == "tab":
-            self._insert_slash_command(menu.highlighted_command)
-            return
-        if event.key == "escape":
-            self._close_slash_menu()
-            return
-        if event.key == "enter":
-            command = menu.highlighted_command
-            if command is None:
-                return
-            self._close_slash_menu()
-            await self._dispatch_command(command.canonical)
-
-    def on_slash_command_menu_command_selected(self, event: SlashCommandMenu.CommandSelected) -> None:
-        self._insert_slash_command(event.command)
+        if input_widget.value.strip().lower() == query:
+            input_widget.value = ""
 
     async def on_model_switcher_bar_preset_changed(self, event: ModelSwitcherBar.PresetChanged) -> None:
         await self._set_model_preset(event.value or None, bar=event.bar)
@@ -1193,20 +1119,29 @@ class AgentZeroCLI(App):
             )
             return
 
-        if event.action == "pause":
-            self.run_worker(self.action_pause_agent(), exclusive=True, name="splash-pause")
+        if not event.action.startswith("/"):
             return
 
-        command = {
-            "chats": "/chats",
-            "compact": "/compact",
-            "nudge": "/nudge",
-        }.get(event.action)
-        if command:
-            self.run_worker(self._dispatch_command(command), exclusive=True, name=f"splash-{event.action}")
+        worker_name = f"splash-{event.action.lstrip('/').replace('/', '-')}"
+        self.run_worker(self._dispatch_command(event.action), exclusive=True, name=worker_name)
 
     async def _cmd_help(self) -> None:
         self._surface_help()
+
+    async def _cmd_keys(self) -> None:
+        help_panel_visible = False
+        try:
+            help_panel_visible = bool(self.screen.query("HelpPanel"))
+        except Exception:
+            help_panel_visible = False
+
+        if help_panel_visible:
+            self.action_hide_help_panel()
+        else:
+            self.action_show_help_panel()
+
+    async def _cmd_quit(self) -> None:
+        await self.action_quit()
 
     async def _cmd_clear(self) -> None:
         self.query_one("#chat-log", ChatLog).clear()

@@ -10,6 +10,7 @@ from agent_zero_cli.app import AgentZeroCLI, _DEFAULT_HOST
 from agent_zero_cli.config import CLIConfig
 from agent_zero_cli.rendering import render_connector_event
 from agent_zero_cli.screens.model_presets import ModelPresetsResult
+from agent_zero_cli.widgets.command_palette import AgentCommandPalette
 from agent_zero_cli.widgets.chat_log import (
     _AGENT_ZERO_BANNER,
     _AGENT_ZERO_BANNER_COMPACT,
@@ -876,7 +877,7 @@ def test_system_commands_are_curated_and_ordered(dummy_app: DummyAgentZeroCLI) -
 
     titles = [command.title for command in dummy_app.get_system_commands(screen)]
 
-    assert titles == ["New Chat", "Chats", "Keys", "Help", "Quit"]
+    assert titles == ["/new", "/chats", "/compact", "/keys", "/help", "/quit"]
 
 
 def test_system_commands_include_model_presets_when_available(dummy_app: DummyAgentZeroCLI) -> None:
@@ -901,13 +902,24 @@ def test_system_commands_include_model_presets_when_available(dummy_app: DummyAg
     titles = [command.title for command in dummy_app.get_system_commands(screen)]
 
     assert titles == [
-        "New Chat",
-        "Chats",
-        "Model Presets",
-        "Keys",
-        "Help",
-        "Quit",
+        "/new",
+        "/chats",
+        "/compact",
+        "/presets",
+        "/keys",
+        "/help",
+        "/quit",
     ]
+
+
+def test_welcome_actions_match_visible_system_commands(dummy_app: DummyAgentZeroCLI) -> None:
+    screen = SimpleNamespace(query=lambda selector: [])
+    titles = [command.title for command in dummy_app.get_system_commands(screen)]
+    splash_titles = [action.title for action in dummy_app._welcome_actions()]
+    splash_keys = [action.key for action in dummy_app._welcome_actions()]
+
+    assert splash_titles == titles
+    assert splash_keys == titles
 
 
 async def test_model_presets_command_opens_picker_and_applies_selection(
@@ -969,29 +981,36 @@ async def test_model_presets_command_opens_picker_and_applies_selection(
     assert selected == ["Fast"]
 
 
-def test_slash_menu_opens_and_closes_with_query_changes(dummy_app: DummyAgentZeroCLI) -> None:
-    dummy_app.connected = True
-    dummy_app.connector_features = {"chat_create", "chats_list"}
-
-    dummy_app.on_chat_input_value_changed(SimpleNamespace(value="/", input=dummy_app._test_widgets["#message-input"]))
-    menu = dummy_app._test_widgets["#slash-menu"]
-    assert menu.display is True
-    assert menu.commands
-
-    dummy_app.on_chat_input_value_changed(SimpleNamespace(value="/help ", input=dummy_app._test_widgets["#message-input"]))
-    assert menu.display is False
-
-
-async def test_slash_tab_inserts_highlighted_canonical_command(dummy_app: DummyAgentZeroCLI) -> None:
+def test_slash_query_opens_command_palette_with_seeded_query(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     dummy_app.connected = True
     dummy_app.connector_features = {"chat_create", "chats_list"}
     input_widget = dummy_app._test_widgets["#message-input"]
+    input_widget.value = "/"
+
+    opened: list[AgentCommandPalette] = []
+    monkeypatch.setattr(dummy_app, "_is_command_palette_open", lambda: False)
+    monkeypatch.setattr(dummy_app, "push_screen", lambda screen: opened.append(screen))
 
     dummy_app.on_chat_input_value_changed(SimpleNamespace(value="/", input=input_widget))
-    await dummy_app.on_chat_input_slash_navigation(SimpleNamespace(key="tab", input=input_widget))
 
-    assert input_widget.value.endswith(" ")
-    assert input_widget.value.startswith("/")
+    assert opened
+    assert isinstance(opened[0], AgentCommandPalette)
+    assert opened[0]._initial_query == "/"
+    assert dummy_app._slash_palette_query == "/"
+
+
+def test_command_palette_closed_clears_stale_slash_query(dummy_app: DummyAgentZeroCLI) -> None:
+    input_widget = dummy_app._test_widgets["#message-input"]
+    input_widget.value = "/"
+    dummy_app._slash_palette_query = "/"
+
+    dummy_app.on_command_palette_closed(SimpleNamespace(option_selected=False))
+
+    assert input_widget.value == ""
+    assert dummy_app._slash_palette_query is None
 
 
 async def test_unknown_command_fails_gracefully_on_welcome(dummy_app: DummyAgentZeroCLI) -> None:

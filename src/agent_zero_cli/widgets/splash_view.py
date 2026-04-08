@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Sequence, TypeAlias
 
-from rich.console import Group
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Grid, Vertical, VerticalScroll
@@ -24,7 +23,6 @@ _STAGE_LABELS: dict[SplashStage, str] = {
     "error": "Connection issue",
 }
 _DEFAULT_HOST = "http://127.0.0.1:5080"
-_DEFAULT_ACTION_KEYS: tuple[str, ...] = ("chats", "compact", "pause", "nudge")
 
 
 @dataclass(frozen=True)
@@ -202,10 +200,10 @@ class SplashActionCard(Vertical):
     }
     """
 
-    def __init__(self, key: str) -> None:
-        super().__init__(id=f"splash-action-{key}", classes="splash-action-card")
+    def __init__(self, key: str, *, index: int) -> None:
+        super().__init__(id=f"splash-action-{index}", classes="splash-action-card")
         self.key = key
-        self._button = Button("", id=f"splash-action-{key}-button")
+        self._button = Button("", id=f"splash-action-button-{index}")
         self._description = Static("", classes="splash-action-description")
         self._reason = Static("", classes="splash-action-reason")
 
@@ -243,24 +241,40 @@ class SplashActionDeck(Grid):
 
     def __init__(self) -> None:
         super().__init__(id="splash-actions-grid")
-        self._cards = {key: SplashActionCard(key) for key in _DEFAULT_ACTION_KEYS}
+        self._cards: dict[str, SplashActionCard] = {}
+        self._button_to_key: dict[str, str] = {}
+        self._last_actions: tuple[SplashAction, ...] = ()
 
     def compose(self) -> ComposeResult:
-        for key in _DEFAULT_ACTION_KEYS:
-            yield self._cards[key]
+        yield from ()
 
     def set_actions(self, actions: Sequence[SplashAction]) -> None:
-        by_key = {action.key: action for action in actions}
-        for key, card in self._cards.items():
-            card.set_action(by_key.get(key))
+        self._last_actions = tuple(actions)
+        if not self.is_mounted:
+            return
+        self._rebuild_cards(self._last_actions)
+
+    def on_mount(self) -> None:
+        self._rebuild_cards(self._last_actions)
+
+    def _rebuild_cards(self, actions: Sequence[SplashAction]) -> None:
+        self._button_to_key.clear()
+        for child in list(self.children):
+            child.remove()
+        self._cards.clear()
+
+        for index, action in enumerate(actions):
+            card = SplashActionCard(action.key, index=index)
+            self._cards[action.key] = card
+            self.mount(card)
+            card.set_action(action)
+            button_id = f"splash-action-button-{index}"
+            if button_id:
+                self._button_to_key[button_id] = action.key
 
     def action_for_button_id(self, button_id: str) -> str | None:
-        prefix = "splash-action-"
-        suffix = "-button"
-        if not button_id.startswith(prefix) or not button_id.endswith(suffix):
-            return None
-        key = button_id[len(prefix) : -len(suffix)]
-        if key in self._cards and self._cards[key].enabled:
+        key = self._button_to_key.get(button_id)
+        if key and key in self._cards and self._cards[key].enabled:
             return key
         return None
 
@@ -325,38 +339,8 @@ class SplashView(VerticalScroll):
         self._status_panel.display = stage in {"connecting", "error"}
         self._actions.display = stage == "ready"
 
-    def _apply_action_defaults(self) -> None:
-        self._actions.set_actions(self._default_actions())
-
     def _default_actions(self) -> Sequence[SplashAction]:
-        return (
-            SplashAction(
-                key="chats",
-                title="Chats",
-                description="Open chat history.",
-            ),
-            SplashAction(
-                key="compact",
-                title="Compact",
-                description="Compact this chat.",
-                enabled=False,
-                disabled_reason="Available when compaction stats are ready.",
-            ),
-            SplashAction(
-                key="pause",
-                title="Pause",
-                description="Pause the active run.",
-                enabled=False,
-                disabled_reason="Available while a run is active.",
-            ),
-            SplashAction(
-                key="nudge",
-                title="Nudge",
-                description="Continue the current run.",
-                enabled=False,
-                disabled_reason="Available while the agent is active.",
-            ),
-        )
+        return ()
 
     def _sync_state(self) -> None:
         self._apply_stage(self._state.stage)

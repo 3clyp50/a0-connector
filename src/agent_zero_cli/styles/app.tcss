@@ -385,31 +385,3 @@ SplashStatusPanel {
 .splash-action-card .splash-action-reason {
     color: #f0b54d;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Slash suggestions                                                          */
-/* -------------------------------------------------------------------------- */
-
-SlashCommandMenu {
-    margin-top: 1;
-    border: round #0f6db8;
-    background: #101820;
-    padding: 1 2;
-}
-
-#slash-menu-title {
-    text-style: bold;
-    margin-bottom: 1;
-}
-
-#slash-menu-help {
-    color: #9aa7b4;
-    margin-top: 1;
-}
-
-#slash-menu-list {
-    height: auto;
-    max-height: 11;
-    border: round #1f3e57;
-    background: #17181a;
-}

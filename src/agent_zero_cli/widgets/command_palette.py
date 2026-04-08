@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from textual.command import CommandPalette, DiscoveryHit, Hit, Provider
+from textual.widgets import Input
 
 
 class OrderedSystemCommandsProvider(Provider):
@@ -19,11 +20,16 @@ class OrderedSystemCommandsProvider(Provider):
 
 
 class AgentCommandPalette(CommandPalette):
-    """Command palette with a tighter header and no leading search icon."""
+    """Command palette with slash-first styling and optional seeded query."""
+
+    def __init__(self, *args, initial_query: str = "", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._initial_query = initial_query
 
     DEFAULT_CSS = CommandPalette.DEFAULT_CSS + """
     AgentCommandPalette > Vertical {
-        margin-top: 1;
+        margin-top: 0;
+        background: transparent;
     }
 
     AgentCommandPalette SearchIcon {
@@ -33,6 +39,32 @@ class AgentCommandPalette(CommandPalette):
     }
 
     AgentCommandPalette #--input {
-        min-height: 3;
+        min-height: 1;
+        border: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    AgentCommandPalette #--results {
+        margin-top: 0;
+    }
+
+    AgentCommandPalette CommandList {
+        border: none;
+        background: transparent;
+        max-height: 12;
+    }
+
+    AgentCommandPalette CommandList > .option-list--option {
+        padding: 0 1;
     }
     """
+
+    def on_mount(self) -> None:
+        if self._initial_query:
+            self.call_after_refresh(self._apply_initial_query)
+
+    def _apply_initial_query(self) -> None:
+        input_widget = self.query_one(Input)
+        input_widget.value = self._initial_query
+        input_widget.action_end()
