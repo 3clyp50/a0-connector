@@ -8,6 +8,7 @@ import usr.plugins.a0_connector.api.v1.base as connector_base
 class ChatDelete(connector_base.ProtectedConnectorApiHandler):
     async def process(self, input: dict, request: Request) -> dict | Response:
         from agent import AgentContext
+        from api.chat_remove import RemoveChat
 
         context_id = str(input.get("context_id", "")).strip()
         if not context_id:
@@ -26,8 +27,8 @@ class ChatDelete(connector_base.ProtectedConnectorApiHandler):
             )
 
         try:
-            context.reset()
-            AgentContext.remove(context_id)
+            handler = RemoveChat(self.app, self.thread_lock)
+            await handler.process({"context": context_id}, request)
         except Exception as exc:
             return Response(
                 response=f'{{"error": "{str(exc)}"}}',

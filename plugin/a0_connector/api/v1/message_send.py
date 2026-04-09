@@ -13,9 +13,13 @@ import usr.plugins.a0_connector.api.v1.base as connector_base
 
 class MessageSend(connector_base.ProtectedConnectorApiHandler):
     async def process(self, input: dict, request: Request) -> dict | Response:
-        from agent import AgentContext, AgentContextType, UserMessage
-        from helpers import files, projects
-        from initialize import initialize_agent
+        from agent import UserMessage
+        from helpers import files
+        from usr.plugins.a0_connector.helpers.chat_context import (
+            ConnectorContextError,
+            create_context,
+            get_existing_context,
+        )
 
         message = str(input.get("message", "")).strip()
         if not message:
@@ -26,6 +30,10 @@ class MessageSend(connector_base.ProtectedConnectorApiHandler):
             )
 
         context_id = str(input.get("context_id", "")).strip() or None
+        current_context_id = (
+            str(input.get("current_context", input.get("current_context_id", ""))).strip()
+            or None
+        )
         project_name = str(input.get("project_name", "")).strip() or None
         agent_profile = str(input.get("agent_profile", "")).strip() or None
         attachments_data = input.get("attachments", [])
@@ -55,49 +63,33 @@ class MessageSend(connector_base.ProtectedConnectorApiHandler):
                 except Exception as exc:
                     PrintStyle.error(f"[a0-connector] attachment error: {exc}")
 
-        if context_id:
-            context = AgentContext.get(context_id)
-            if context is None:
-                return Response(
-                    response='{"error": "Context not found"}',
-                    status=404,
-                    mimetype="application/json",
+        try:
+            if context_id:
+                context = get_existing_context(
+                    context_id,
+                    agent_profile=agent_profile,
+                    project_name=project_name,
                 )
-            if (
-                agent_profile
-                and getattr(context.agent0.config, "profile", None) != agent_profile
-            ):
-                return Response(
-                    response='{"error": "Cannot change agent_profile on existing context"}',
-                    status=400,
-                    mimetype="application/json",
+            else:
+                context = create_context(
+                    lock=self.thread_lock,
+                    current_context_id=current_context_id,
+                    agent_profile=agent_profile,
+                    project_name=project_name,
                 )
-            existing_project = context.get_data(projects.CONTEXT_DATA_KEY_PROJECT)
-            if project_name and existing_project and existing_project != project_name:
-                return Response(
-                    response='{"error": "Project can only be set on first message"}',
-                    status=400,
-                    mimetype="application/json",
-                )
-        else:
-            override_settings: dict[str, str] = {}
-            if agent_profile:
-                override_settings["agent_profile"] = agent_profile
-            context = AgentContext(
-                config=initialize_agent(override_settings=override_settings),
-                type=AgentContextType.USER,
+                context_id = context.id
+        except ConnectorContextError as exc:
+            return Response(
+                response=f'{{"error": "{str(exc)}"}}',
+                status=exc.status_code,
+                mimetype="application/json",
             )
-            AgentContext.use(context.id)
-            context_id = context.id
-            if project_name:
-                try:
-                    projects.activate_project(context_id, project_name)
-                except Exception as exc:
-                    return Response(
-                        response=f'{{"error": "Failed to activate project: {str(exc)}"}}',
-                        status=400,
-                        mimetype="application/json",
-                    )
+        except Exception as exc:
+            return Response(
+                response=f'{{"error": "Failed to activate project: {str(exc)}"}}',
+                status=400,
+                mimetype="application/json",
+            )
 
         attachment_names = [os.path.basename(path) for path in attachment_paths]
         message_id = str(uuid.uuid4())

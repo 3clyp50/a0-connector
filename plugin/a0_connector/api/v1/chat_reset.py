@@ -8,6 +8,7 @@ import usr.plugins.a0_connector.api.v1.base as connector_base
 class ChatReset(connector_base.ProtectedConnectorApiHandler):
     async def process(self, input: dict, request: Request) -> dict | Response:
         from agent import AgentContext
+        from api.chat_reset import Reset
 
         context_id = str(input.get("context_id", "")).strip()
         if not context_id:
@@ -25,5 +26,6 @@ class ChatReset(connector_base.ProtectedConnectorApiHandler):
                 mimetype="application/json",
             )
 
-        context.reset()
+        handler = Reset(self.app, self.thread_lock)
+        await handler.process({"context": context_id}, request)
         return {"context_id": context_id, "status": "reset"}

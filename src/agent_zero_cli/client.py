@@ -489,8 +489,12 @@ class A0Client:
             },
         )
 
-    async def create_chat(self) -> str:
-        response = await self._post("chat_create")
+    async def create_chat(self, *, current_context_id: str | None = None) -> str:
+        payload = {}
+        if current_context_id:
+            payload["current_context"] = current_context_id
+
+        response = await self._post("chat_create", payload)
         response.raise_for_status()
         data = self._json(response)
         return data.get("context_id") or data.get("ctxid", "")

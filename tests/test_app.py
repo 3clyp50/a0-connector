@@ -882,7 +882,12 @@ async def test_new_chat_returns_to_ready_welcome(
     dummy_app._sync_body_mode()
 
     monkeypatch.setattr(dummy_app.client, "unsubscribe_context", lambda context_id: _async_return(None))
-    monkeypatch.setattr(dummy_app.client, "create_chat", lambda: _async_return("ctx-new"))
+    create_chat_calls: list[str | None] = []
+    monkeypatch.setattr(
+        dummy_app.client,
+        "create_chat",
+        lambda *, current_context_id=None: create_chat_calls.append(current_context_id) or _async_return("ctx-new"),
+    )
     monkeypatch.setattr(dummy_app.client, "subscribe_context", lambda context_id, from_seq=0: _async_return(None))
     monkeypatch.setattr(
         dummy_app.client,
@@ -909,6 +914,7 @@ async def test_new_chat_returns_to_ready_welcome(
     assert splash.state.stage == "ready"
     assert body.current == "splash-view"
     assert input_widget.focused is True
+    assert create_chat_calls == ["ctx-old"]
 
 
 async def test_model_switcher_preset_change_updates_current_chat_models(

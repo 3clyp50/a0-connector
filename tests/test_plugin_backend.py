@@ -127,6 +127,7 @@ def _install_fake_helpers(
         def __init__(self, app=None, thread_lock=None) -> None:
             self.app = app
             self.thread_lock = thread_lock
+            self.lock = thread_lock
 
         async def emit_to(
             self,
@@ -157,10 +158,12 @@ def _install_fake_helpers(
     security_mod.safe_filename = lambda value: value
     runtime_mod.is_development = lambda: True
     runtime_mod.is_dockerized = lambda: False
+    projects_mod.CONTEXT_DATA_KEY_PROJECT = "project"
     projects_mod.get_project_folder = lambda project_name: f"/projects/{project_name}"
     projects_mod.get_project_meta = (
         lambda project_name, *parts: "/projects/" + project_name + "/" + "/".join(parts)
     )
+    projects_mod.activate_project = lambda context_id, project_name, mark_dirty=True: None
     files_mod.normalize_a0_path = lambda value: value
     files_mod.is_in_dir = lambda path, root: str(path).startswith(str(root))
     files_mod.get_abs_path = lambda *parts: "/".join(str(part).strip("/") for part in parts if str(part))
@@ -343,6 +346,217 @@ def _reset_ws_runtime_state(ws_runtime_mod) -> None:
         ws_runtime_mod._remote_tree_snapshots.clear()
 
 
+def _install_fake_connector_chat_env() -> dict[str, object]:
+    _install_fake_helpers()
+
+    state: dict[str, object] = {
+        "communicate_calls": [],
+        "dirty_reasons": [],
+        "initialize_calls": [],
+        "project_activations": [],
+        "removed_context_ids": [],
+    }
+
+    projects_mod = sys.modules["helpers.projects"]
+    state_monitor_mod = sys.modules["helpers.state_monitor_integration"]
+
+    class _FakeConfig:
+        def __init__(self, profile: str = "default") -> None:
+            self.profile = profile
+
+    class _FakeTask:
+        def __init__(self, payload) -> None:
+            self._payload = payload
+
+        async def result(self):
+            return self._payload
+
+    @dataclass
+    class UserMessage:
+        message: str
+        attachments: list[str]
+        id: str = ""
+
+    class _FakeAgent:
+        def __init__(self, config: _FakeConfig, context) -> None:
+            self.config = config
+            self._context = context
+
+    class AgentContextType:
+        USER = "user"
+
+    class AgentContext:
+        _contexts: dict[str, "AgentContext"] = {}
+        _current_id = ""
+        _counter = 0
+
+        def __init__(self, config, id=None, type=None, set_current: bool = False) -> None:
+            AgentContext._counter += 1
+            self.id = id or f"ctx-{AgentContext._counter}"
+            self.agent0 = _FakeAgent(config, self)
+            self.type = type
+            self.data: dict[str, object] = {}
+            self.output_data: dict[str, object] = {}
+            self.created_at = "2026-04-09T00:00:00Z"
+            self.reset_calls = 0
+            self.last_user_message = None
+            self.log_entries: list[dict[str, object]] = []
+            self.log = types.SimpleNamespace(log=self._log)
+            AgentContext._contexts[self.id] = self
+            if set_current:
+                AgentContext._current_id = self.id
+
+        def _log(self, **kwargs) -> None:
+            self.log_entries.append(kwargs)
+
+        def output(self) -> dict[str, object]:
+            return {"created_at": self.created_at}
+
+        @staticmethod
+        def get(context_id: str):
+            return AgentContext._contexts.get(context_id)
+
+        @staticmethod
+        def use(context_id: str):
+            context = AgentContext.get(context_id)
+            AgentContext._current_id = context_id if context else ""
+            return context
+
+        @staticmethod
+        def current():
+            return AgentContext.get(AgentContext._current_id)
+
+        @staticmethod
+        def remove(context_id: str):
+            removed_ids = state["removed_context_ids"]
+            assert isinstance(removed_ids, list)
+            removed_ids.append(context_id)
+            return AgentContext._contexts.pop(context_id, None)
+
+        def get_data(self, key: str, recursive: bool = True):
+            return self.data.get(key)
+
+        def set_data(self, key: str, value, recursive: bool = True) -> None:
+            self.data[key] = value
+
+        def get_output_data(self, key: str):
+            return self.output_data.get(key)
+
+        def set_output_data(self, key: str, value) -> None:
+            self.output_data[key] = value
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+        def communicate(self, user_message: UserMessage):
+            self.last_user_message = user_message
+            calls = state["communicate_calls"]
+            assert isinstance(calls, list)
+            calls.append((self.id, user_message))
+            return _FakeTask({"message": f"echo:{user_message.message}"})
+
+    def initialize_agent(override_settings: dict | None = None):
+        overrides = dict(override_settings or {})
+        calls = state["initialize_calls"]
+        assert isinstance(calls, list)
+        calls.append(overrides)
+        return _FakeConfig(profile=overrides.get("agent_profile", "default"))
+
+    def activate_project(context_id: str, project_name: str, mark_dirty: bool = True) -> None:
+        if project_name == "broken":
+            raise RuntimeError("broken project")
+
+        calls = state["project_activations"]
+        assert isinstance(calls, list)
+        calls.append((context_id, project_name, mark_dirty))
+
+        context = AgentContext.get(context_id)
+        if context is None:
+            raise RuntimeError("missing context")
+
+        context.set_data(projects_mod.CONTEXT_DATA_KEY_PROJECT, project_name)
+        context.set_output_data(
+            projects_mod.CONTEXT_DATA_KEY_PROJECT,
+            {"name": project_name, "title": project_name, "color": ""},
+        )
+
+    def mark_dirty_all(reason=None) -> None:
+        reasons = state["dirty_reasons"]
+        assert isinstance(reasons, list)
+        reasons.append(reason)
+
+    projects_mod.activate_project = activate_project
+    state_monitor_mod.mark_dirty_all = mark_dirty_all
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.AgentContext = AgentContext
+    agent_mod.AgentContextType = AgentContextType
+    agent_mod.UserMessage = UserMessage
+    sys.modules["agent"] = agent_mod
+
+    initialize_mod = types.ModuleType("initialize")
+    initialize_mod.initialize_agent = initialize_agent
+    sys.modules["initialize"] = initialize_mod
+
+    state["AgentContext"] = AgentContext
+    state["make_config"] = _FakeConfig
+    return state
+
+
+def _install_fake_core_chat_modules(state: dict[str, object]) -> None:
+    api_pkg = types.ModuleType("api")
+    chat_reset_mod = types.ModuleType("api.chat_reset")
+    chat_remove_mod = types.ModuleType("api.chat_remove")
+
+    state["core_reset_calls"] = []
+    state["core_remove_calls"] = []
+
+    class Reset:
+        def __init__(self, app=None, thread_lock=None) -> None:
+            self.app = app
+            self.thread_lock = thread_lock
+
+        async def process(self, input: dict, request) -> dict[str, str]:
+            calls = state["core_reset_calls"]
+            assert isinstance(calls, list)
+            calls.append(
+                {
+                    "input": dict(input),
+                    "request": request,
+                    "app": self.app,
+                    "thread_lock": self.thread_lock,
+                }
+            )
+            return {"message": "Agent restarted."}
+
+    class RemoveChat:
+        def __init__(self, app=None, thread_lock=None) -> None:
+            self.app = app
+            self.thread_lock = thread_lock
+
+        async def process(self, input: dict, request) -> dict[str, str]:
+            calls = state["core_remove_calls"]
+            assert isinstance(calls, list)
+            calls.append(
+                {
+                    "input": dict(input),
+                    "request": request,
+                    "app": self.app,
+                    "thread_lock": self.thread_lock,
+                }
+            )
+            return {"message": "Context removed."}
+
+    chat_reset_mod.Reset = Reset
+    chat_remove_mod.RemoveChat = RemoveChat
+    api_pkg.chat_reset = chat_reset_mod
+    api_pkg.chat_remove = chat_remove_mod
+
+    sys.modules["api"] = api_pkg
+    sys.modules["api.chat_reset"] = chat_reset_mod
+    sys.modules["api.chat_remove"] = chat_remove_mod
+
+
 def test_capabilities_advertise_current_ws_contract() -> None:
     _install_fake_helpers()
 
@@ -448,6 +662,200 @@ def test_protected_handlers_require_api_key_only() -> None:
         assert handler_cls.requires_auth() is False
         assert handler_cls.requires_csrf() is False
         assert handler_cls.requires_api_key() is True
+
+
+def test_chat_create_inherits_project_and_model_override_from_current_context() -> None:
+    state = _install_fake_connector_chat_env()
+
+    chat_create_mod = _reload("usr.plugins.a0_connector.api.v1.chat_create")
+    context_cls = state["AgentContext"]
+    config_cls = state["make_config"]
+    assert callable(context_cls)
+    assert callable(config_cls)
+
+    current = context_cls(config=config_cls(), id="ctx-current", set_current=True)
+    current.set_data("project", "atlas")
+    current.set_output_data("project", {"name": "atlas", "title": "Atlas", "color": "#123"})
+    current.set_data("chat_model_override", {"preset_name": "fast"})
+
+    payload = asyncio.run(
+        chat_create_mod.ChatCreate(None, None).process({"current_context": "ctx-current"}, object())
+    )
+
+    new_context = context_cls.get(payload["context_id"])
+    assert new_context is not None
+    assert new_context.id != "ctx-current"
+    assert new_context.get_data("project") == "atlas"
+    assert new_context.get_output_data("project") == {
+        "name": "atlas",
+        "title": "Atlas",
+        "color": "#123",
+    }
+    assert new_context.get_data("chat_model_override") == {"preset_name": "fast"}
+    assert payload["project_name"] == "atlas"
+    assert payload["agent_profile"] == "default"
+    assert state["dirty_reasons"] == ["plugins.a0_connector.chat_context.create_context"]
+
+
+def test_chat_create_applies_explicit_project_and_profile_overrides() -> None:
+    state = _install_fake_connector_chat_env()
+
+    chat_create_mod = _reload("usr.plugins.a0_connector.api.v1.chat_create")
+    context_cls = state["AgentContext"]
+    config_cls = state["make_config"]
+    assert callable(context_cls)
+    assert callable(config_cls)
+
+    current = context_cls(config=config_cls(), id="ctx-current", set_current=True)
+    current.set_data("project", "atlas")
+    current.set_output_data("project", {"name": "atlas", "title": "Atlas", "color": "#123"})
+    current.set_data("chat_model_override", {"preset_name": "fast"})
+
+    payload = asyncio.run(
+        chat_create_mod.ChatCreate(None, None).process(
+            {
+                "current_context": "ctx-current",
+                "project_name": "nebula",
+                "agent_profile": "researcher",
+            },
+            object(),
+        )
+    )
+
+    new_context = context_cls.get(payload["context_id"])
+    assert new_context is not None
+    assert new_context.agent0.config.profile == "researcher"
+    assert new_context.get_data("project") == "nebula"
+    assert new_context.get_data("chat_model_override") == {"preset_name": "fast"}
+    assert payload["project_name"] == "nebula"
+    assert state["project_activations"] == [(new_context.id, "nebula", False)]
+
+
+def test_chat_reset_delegates_to_core_handler_and_preserves_missing_404() -> None:
+    state = _install_fake_connector_chat_env()
+    _install_fake_core_chat_modules(state)
+
+    chat_reset_mod = _reload("usr.plugins.a0_connector.api.v1.chat_reset")
+    context_cls = state["AgentContext"]
+    config_cls = state["make_config"]
+    assert callable(context_cls)
+    assert callable(config_cls)
+
+    context_cls(config=config_cls(), id="ctx-reset", set_current=True)
+    handler = chat_reset_mod.ChatReset(app="app", thread_lock="lock")
+    request = object()
+
+    result = asyncio.run(handler.process({"context_id": "ctx-reset"}, request))
+    assert result == {"context_id": "ctx-reset", "status": "reset"}
+    assert state["core_reset_calls"] == [
+        {
+            "input": {"context": "ctx-reset"},
+            "request": request,
+            "app": "app",
+            "thread_lock": "lock",
+        }
+    ]
+
+    missing = asyncio.run(handler.process({"context_id": "ctx-missing"}, request))
+    assert hasattr(missing, "status")
+    assert missing.status == 404
+    assert len(state["core_reset_calls"]) == 1
+
+
+def test_chat_delete_delegates_to_core_handler_and_preserves_missing_404() -> None:
+    state = _install_fake_connector_chat_env()
+    _install_fake_core_chat_modules(state)
+
+    chat_delete_mod = _reload("usr.plugins.a0_connector.api.v1.chat_delete")
+    context_cls = state["AgentContext"]
+    config_cls = state["make_config"]
+    assert callable(context_cls)
+    assert callable(config_cls)
+
+    context_cls(config=config_cls(), id="ctx-delete", set_current=True)
+    handler = chat_delete_mod.ChatDelete(app="app", thread_lock="lock")
+    request = object()
+
+    result = asyncio.run(handler.process({"context_id": "ctx-delete"}, request))
+    assert result == {"context_id": "ctx-delete", "status": "deleted"}
+    assert state["core_remove_calls"] == [
+        {
+            "input": {"context": "ctx-delete"},
+            "request": request,
+            "app": "app",
+            "thread_lock": "lock",
+        }
+    ]
+
+    missing = asyncio.run(handler.process({"context_id": "ctx-missing"}, request))
+    assert hasattr(missing, "status")
+    assert missing.status == 404
+    assert len(state["core_remove_calls"]) == 1
+
+
+def test_message_send_without_context_reuses_shared_creation_semantics() -> None:
+    state = _install_fake_connector_chat_env()
+
+    message_send_mod = _reload("usr.plugins.a0_connector.api.v1.message_send")
+    context_cls = state["AgentContext"]
+    config_cls = state["make_config"]
+    assert callable(context_cls)
+    assert callable(config_cls)
+
+    current = context_cls(config=config_cls(), id="ctx-current", set_current=True)
+    current.set_data("project", "atlas")
+    current.set_output_data("project", {"name": "atlas", "title": "Atlas", "color": "#123"})
+    current.set_data("chat_model_override", {"preset_name": "fast"})
+
+    result = asyncio.run(
+        message_send_mod.MessageSend(None, None).process(
+            {
+                "current_context": "ctx-current",
+                "message": "hello world",
+            },
+            object(),
+        )
+    )
+
+    context_id = result["context_id"]
+    new_context = context_cls.get(context_id)
+    assert new_context is not None
+    assert new_context.get_data("project") == "atlas"
+    assert new_context.get_data("chat_model_override") == {"preset_name": "fast"}
+    assert result["status"] == "completed"
+    communicate_calls = state["communicate_calls"]
+    assert isinstance(communicate_calls, list)
+    assert communicate_calls[0][0] == context_id
+    assert communicate_calls[0][1].message == "hello world"
+
+
+def test_ws_resolve_context_without_context_id_uses_shared_creation_helper() -> None:
+    state = _install_fake_connector_chat_env()
+
+    ws_connector_mod = _reload("usr.plugins.a0_connector.api.ws_connector")
+    context_cls = state["AgentContext"]
+    config_cls = state["make_config"]
+    assert callable(context_cls)
+    assert callable(config_cls)
+
+    current = context_cls(config=config_cls(), id="ctx-current", set_current=True)
+    current.set_data("project", "atlas")
+    current.set_output_data("project", {"name": "atlas", "title": "Atlas", "color": "#123"})
+    current.set_data("chat_model_override", {"preset_name": "fast"})
+
+    context, context_id = asyncio.run(
+        ws_connector_mod.WsConnector(None, None)._resolve_context(
+            context_id=None,
+            current_context_id="ctx-current",
+            agent_profile=None,
+            project_name=None,
+        )
+    )
+
+    assert context is not None
+    assert context_id == context.id
+    assert context.get_data("project") == "atlas"
+    assert context.get_data("chat_model_override") == {"preset_name": "fast"}
 
 
 def test_connector_login_returns_token_when_no_auth_configured() -> None:

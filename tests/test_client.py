@@ -447,6 +447,23 @@ async def test_send_message_uses_prefixed_ws_event() -> None:
     assert "client_message_id" in payload
 
 
+async def test_create_chat_posts_current_context_when_provided() -> None:
+    client = A0Client("http://localhost:5080", api_key="secret")
+    client.http = Mock()
+    client.http.post = AsyncMock(
+        return_value=FakeResponse(status_code=200, json_data={"context_id": "ctx-new"})
+    )
+
+    result = await client.create_chat(current_context_id="ctx-current")
+
+    assert result == "ctx-new"
+    client.http.post.assert_awaited_once_with(
+        "http://localhost:5080/api/plugins/a0_connector/v1/chat_create",
+        json={"current_context": "ctx-current"},
+        headers={"X-API-KEY": "secret"},
+    )
+
+
 async def test_get_settings_posts_to_connector_endpoint() -> None:
     client = A0Client("http://localhost:5080", api_key="secret")
     client.http = Mock()

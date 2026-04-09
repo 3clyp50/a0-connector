@@ -178,25 +178,45 @@ class WsConnector(WsHandler):
         data: dict[str, Any],
         sid: str,
     ) -> dict[str, Any] | WsResult:
+        from usr.plugins.a0_connector.helpers.chat_context import ConnectorContextError
+
         message = str(data.get("message", "")).strip()
         if not message:
             return WsResult.error(
                 code="MISSING_MESSAGE",
                 message="message is required",
                 correlation_id=data.get("correlationId"),
-            )
+        )
 
         context_id = str(data.get("context_id", "")).strip() or None
+        current_context_id = (
+            str(data.get("current_context", data.get("current_context_id", ""))).strip()
+            or None
+        )
         client_message_id = str(data.get("client_message_id", "")).strip()
         attachments = list(data.get("attachments", [])) if isinstance(data.get("attachments"), list) else []
         project_name = str(data.get("project_name", "")).strip() or None
         agent_profile = str(data.get("agent_profile", "")).strip() or None
 
-        context, context_id = await self._resolve_context(
-            context_id=context_id,
-            agent_profile=agent_profile,
-            project_name=project_name,
-        )
+        try:
+            context, context_id = await self._resolve_context(
+                context_id=context_id,
+                current_context_id=current_context_id,
+                agent_profile=agent_profile,
+                project_name=project_name,
+            )
+        except ConnectorContextError as exc:
+            return WsResult.error(
+                code=exc.code,
+                message=str(exc),
+                correlation_id=data.get("correlationId"),
+            )
+        except Exception as exc:
+            return WsResult.error(
+                code="BAD_REQUEST",
+                message=str(exc),
+                correlation_id=data.get("correlationId"),
+            )
         if context is None or context_id is None:
             return WsResult.error(
                 code="CONTEXT_NOT_FOUND",
@@ -329,33 +349,30 @@ class WsConnector(WsHandler):
         self,
         *,
         context_id: str | None,
+        current_context_id: str | None,
         agent_profile: str | None,
         project_name: str | None,
     ) -> tuple[AgentContext | None, str | None]:
-        from agent import AgentContext, AgentContextType
-        from helpers import projects
-        from initialize import initialize_agent
+        from usr.plugins.a0_connector.helpers.chat_context import (
+            create_context,
+            get_existing_context,
+        )
 
         if context_id:
-            context = AgentContext.get(context_id)
-            if context is None:
-                return None, None
-            if agent_profile and getattr(context.agent0.config, "profile", None) != agent_profile:
-                return None, None
+            context = get_existing_context(
+                context_id,
+                agent_profile=agent_profile,
+                project_name=project_name,
+            )
             return context, context_id
 
-        override_settings: dict[str, Any] = {}
-        if agent_profile:
-            override_settings["agent_profile"] = agent_profile
-
-        config = initialize_agent(override_settings=override_settings)
-        context = AgentContext(config=config, type=AgentContextType.USER)
-        AgentContext.use(context.id)
+        context = create_context(
+            lock=self.lock,
+            current_context_id=current_context_id,
+            agent_profile=agent_profile,
+            project_name=project_name,
+        )
         context_id = context.id
-
-        if project_name:
-            projects.activate_project(context_id, project_name)
-
         return context, context_id
 
     async def _run_message(

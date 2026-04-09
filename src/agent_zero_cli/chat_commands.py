@@ -88,7 +88,7 @@ async def cmd_chats(app: AgentZeroCLI) -> None:
 
 async def cmd_new(app: AgentZeroCLI) -> None:
     try:
-        context_id = await app.client.create_chat()
+        context_id = await app.client.create_chat(current_context_id=app.current_context)
     except Exception as exc:
         app._show_notice(f"Failed to create a new chat: {exc}", error=True)
         return
