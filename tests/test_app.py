@@ -1318,6 +1318,22 @@ def test_render_connector_event_pads_info_messages() -> None:
     assert isinstance(log.writes[-1], Padding)
 
 
+def test_render_connector_event_pads_utility_messages() -> None:
+    log = FakeChatLog()
+
+    rendered = render_connector_event(
+        log,
+        {
+            "event": "util_message",
+            "sequence": 17,
+            "data": {"heading": "No useful information to memorize."},
+        },
+    )
+
+    assert rendered is True
+    assert isinstance(log.writes[-1], Padding)
+
+
 def test_extract_detail_strips_code_heading_noise() -> None:
     detail = extract_detail(
         "code_output",
@@ -1495,6 +1511,46 @@ def test_context_event_after_complete_does_not_reactivate_input_lock(dummy_app: 
     assert input_widget.activity_idle is True
     assert log.status_entries[13]["active"] is False
     assert log.status_entries[13]["detail"] == "Memorizing results"
+
+
+def test_context_event_utility_message_is_hidden_by_default(dummy_app: DummyAgentZeroCLI) -> None:
+    dummy_app.connected = True
+    dummy_app.current_context = "ctx-1"
+    dummy_app.current_context_has_messages = True
+
+    dummy_app._handle_context_event(
+        {
+            "context_id": "ctx-1",
+            "event": "util_message",
+            "sequence": 15,
+            "data": {"heading": "No useful information to memorize."},
+        }
+    )
+
+    input_widget = dummy_app._test_widgets["#message-input"]
+    log = dummy_app._test_widgets["#chat-log"]
+    assert input_widget.activity_idle is True
+    assert log._active_seq is None
+    assert 15 not in log.sequences
+    assert dummy_app.rendered_events == []
+
+
+def test_context_event_utility_message_can_be_shown_when_enabled(dummy_app: DummyAgentZeroCLI) -> None:
+    dummy_app.connected = True
+    dummy_app.current_context = "ctx-1"
+    dummy_app.current_context_has_messages = True
+    dummy_app.show_utility_messages = True
+
+    dummy_app._handle_context_event(
+        {
+            "context_id": "ctx-1",
+            "event": "util_message",
+            "sequence": 16,
+            "data": {"heading": "No useful information to memorize."},
+        }
+    )
+
+    assert dummy_app.rendered_events[-1]["event"] == "util_message"
 
 
 def test_context_snapshot_preserves_status_meta_for_history(dummy_app: DummyAgentZeroCLI) -> None:

@@ -111,6 +111,7 @@ class AgentZeroCLI(App):
         self.current_project: dict[str, str] | None = None
         self.current_context: str | None = None
         self.current_context_has_messages = False
+        self.show_utility_messages = False
         self._response_delivered = False
         self._context_run_complete = False
         self._chat_intro_pending = True

@@ -44,6 +44,9 @@ def handle_context_snapshot(app: AgentZeroCLI, data: dict[str, Any]) -> None:
         if category in ("user", "response", "warning", "error", "code", "info"):
             app._show_chat_intro(log, category)
             render_connector_event(log, event)
+        elif category == "util":
+            if app.show_utility_messages:
+                render_connector_event(log, event)
         else:
             label = _STATUS_LABEL.get(event_type)
             if label:
@@ -116,6 +119,9 @@ def handle_context_event(app: AgentZeroCLI, data: dict[str, Any]) -> None:
         if render_connector_event(log, data):
             if log._active_seq == data.get("sequence"):
                 log.stop_active_status()
+    elif category == "util" and app.show_utility_messages:
+        if render_connector_event(log, data) and log._active_seq == data.get("sequence"):
+            log.stop_active_status()
 
 
 def handle_context_complete(app: AgentZeroCLI, data: dict[str, Any]) -> None:

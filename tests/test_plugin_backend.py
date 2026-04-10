@@ -1534,6 +1534,47 @@ def test_event_bridge_maps_info_logs_to_standalone_info_events() -> None:
     ]
 
 
+def test_event_bridge_maps_util_logs_to_utility_events() -> None:
+    _install_fake_helpers()
+
+    class _FakeLog:
+        def output(self, start=None, end=None):
+            return _FakeLogOutput(
+                items=[
+                    {
+                        "no": 9,
+                        "type": "util",
+                        "heading": "No useful information to memorize.",
+                        "timestamp": "2026-04-01T00:00:00Z",
+                    }
+                ],
+                start=0,
+                end=10,
+            )
+
+    class _FakeContext:
+        log = _FakeLog()
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.AgentContext = types.SimpleNamespace(get=lambda context_id: _FakeContext())
+    sys.modules["agent"] = agent_mod
+
+    bridge_mod = _reload("plugins._a0_connector.helpers.event_bridge")
+
+    events, cursor = bridge_mod.get_context_log_entries("ctx-1", after=0)
+
+    assert cursor == 10
+    assert events == [
+        {
+            "context_id": "ctx-1",
+            "sequence": 10,
+            "event": "util_message",
+            "timestamp": "2026-04-01T00:00:00Z",
+            "data": {"heading": "No useful information to memorize."},
+        }
+    ]
+
+
 def test_ws_connector_hello_advertises_remote_exec_and_tree_features() -> None:
     _install_fake_helpers()
 

@@ -22,6 +22,7 @@ _EVENT_CATEGORY: dict[str, str] = {
     "warning": "warning",
     "error": "error",
     "info": "info",
+    "util_message": "util",
     "status": "status",
     "message_complete": "status",
     "context_updated": "status",
@@ -192,6 +193,13 @@ def render_connector_event(log: ChatLog, event: dict[str, Any]) -> bool:
 
     if category == "info":
         msg = f"{heading}: {text}" if heading else text
+        if msg:
+            log.append_or_update(seq, Padding(f"[dim]{msg}[/dim]", (0, 0, 0, 2)))
+            return True
+        return False
+
+    if category == "util":
+        msg = f"{heading}: {text}" if heading and text else heading or text
         if msg:
             log.append_or_update(seq, Padding(f"[dim]{msg}[/dim]", (0, 0, 0, 2)))
             return True

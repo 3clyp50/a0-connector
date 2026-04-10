@@ -20,6 +20,7 @@ EVENT_WARNING = "warning"
 EVENT_ERROR = "error"
 EVENT_INFO = "info"
 EVENT_STATUS = "status"
+EVENT_UTIL_MESSAGE = "util_message"
 EVENT_MESSAGE_COMPLETE = "message_complete"
 EVENT_CONTEXT_UPDATED = "context_updated"
 
@@ -41,7 +42,7 @@ _LOG_TYPE_MAP: dict[str, str] = {
     "tool": EVENT_TOOL_START,
     "tool_output": EVENT_TOOL_OUTPUT,
     "user": EVENT_USER_MESSAGE,
-    "util": EVENT_STATUS,
+    "util": EVENT_UTIL_MESSAGE,
     "warning": EVENT_WARNING,
 }
 
