@@ -51,28 +51,7 @@ needed). Great for quick layout checks, CI diffing, or sharing.
 
 Output lands in `devtools/snapshots/` by default.
 
-## 3. Activity Demo (`activity_demo.py`)
-
-Simulates agent progress states (idle → busy → idle) and captures three
-SVG snapshots to verify the in-input progress indicator visually matches the
-core WebUI.
-
-```bash
-# Windows
-.\.venv\Scripts\python devtools/activity_demo.py
-
-# Linux / macOS
-./.venv/bin/python devtools/activity_demo.py
-```
-
-Produces:
-| File | Shows |
-|------|-------|
-| `snapshots/tui_idle.svg` | Normal placeholder |
-| `snapshots/tui_activity.svg` | Spinner + "Using tool [web_search]" |
-| `snapshots/tui_reset.svg` | Placeholder restored after reset |
-
-## 4. AI Agent Runbook: Send Text Through the Textual Wrapper
+## 3. AI Agent Runbook: Send Text Through the Textual Wrapper
 
 When the app is served via `devtools/serve.py`, Textual is rendered through an
 `xterm.js` wrapper. This means widget IDs like `#splash-host-input` are not
@@ -146,11 +125,10 @@ NODE
 ## Typical Workflow
 
 1. **Making CSS / layout changes** → run `serve.py`, open browser, iterate live.
-2. **Verifying a specific state** → run `activity_demo.py`, check SVGs.
-3. **Quick smoke test** → run `snapshot.py`, compare SVGs before/after.
-4. **AI-assisted review** → start `serve.py`, let the assistant take browser
+2. **Quick smoke test** → run `snapshot.py`, compare SVGs before/after.
+3. **AI-assisted review** → start `serve.py`, let the assistant take browser
    screenshots and give visual feedback.
-5. **AI/DevOps scripted input** → drive `#terminal .xterm-helper-textarea` for
+4. **AI/DevOps scripted input** → drive `#terminal .xterm-helper-textarea` for
    reproducible login/host-entry flows in CI or local diagnostics.
 
 ## Files
@@ -160,6 +138,5 @@ devtools/
 ├── README.md            # This file
 ├── serve.py             # Browser preview server
 ├── snapshot.py          # SVG snapshot capture
-├── activity_demo.py     # Progress state demo + captures
 └── snapshots/           # Generated SVGs (gitignored)
 ```
