@@ -35,6 +35,8 @@ from agent_zero_cli.widgets import (
     ConnectionStatus,
     DynamicFooter,
     ModelSwitcherBar,
+    ProjectMenuItem,
+    ProjectMenuPopover,
     SplashAction,
     SplashState,
     SplashView,
@@ -137,6 +139,7 @@ class AgentZeroCLI(App):
         self._pause_latched = False
         self._slash_palette_query: str | None = None
         self._compaction_refresh_context: str | None = None
+        self._project_menu_popover: ProjectMenuPopover | None = None
 
     def compose(self) -> ComposeResult:
         yield ConnectionStatus(id="connection-status")
@@ -313,6 +316,9 @@ class AgentZeroCLI(App):
             enabled=self.connected and bool(self.current_context) and "projects" in self.connector_features,
         )
 
+    def _is_project_menu_open(self) -> bool:
+        return self._project_menu_popover is not None
+
     def _stop_token_refresh(self) -> None:
         stop_token_refresh(self)
 
@@ -348,6 +354,42 @@ class AgentZeroCLI(App):
 
     async def _refresh_workspace_from_settings(self) -> None:
         await splash_helpers.refresh_workspace_from_settings(self)
+
+    async def _open_project_menu(self) -> None:
+        await self._refresh_projects(context_id=self.current_context, silent=False)
+        if self._project_menu_popover is not None:
+            self.call_after_refresh(self._project_menu_popover.focus_first_item)
+            return
+
+        popover = ProjectMenuPopover(
+            self.project_list,
+            current_project=self.current_project,
+            id="project-menu-popover",
+        )
+        self._project_menu_popover = popover
+        await self.mount(popover)
+        self.call_after_refresh(popover.focus_first_item)
+
+    async def _toggle_project_menu(self) -> None:
+        if self._project_menu_popover is not None:
+            await self._hide_project_menu()
+            return
+        await self._open_project_menu()
+
+    async def _hide_project_menu(self) -> None:
+        popover = self._project_menu_popover
+        self._project_menu_popover = None
+        if popover is None:
+            return
+        await popover.remove()
+
+    async def _handle_project_menu_action(self, action: str, project_name_value: str | None = None) -> None:
+        await self._hide_project_menu()
+        await project_commands.handle_project_menu_action(
+            self,
+            action,
+            project_name_value=project_name_value,
+        )
 
     def _splash_host(self) -> str:
         return splash_helpers.splash_host(self)
@@ -747,7 +789,18 @@ class AgentZeroCLI(App):
 
     def on_connection_status_project_requested(self, event: ConnectionStatus.ProjectRequested) -> None:
         del event
-        self.run_worker(self._cmd_project(), exclusive=True, name="cmd-project")
+        self.run_worker(self._toggle_project_menu(), exclusive=True, name="toggle-project-menu")
+
+    def on_project_menu_popover_dismiss_requested(self, event: ProjectMenuPopover.DismissRequested) -> None:
+        del event
+        self.run_worker(self._hide_project_menu(), exclusive=True, name="hide-project-menu")
+
+    def on_project_menu_item_selected(self, event: ProjectMenuItem.Selected) -> None:
+        self.run_worker(
+            self._handle_project_menu_action(event.action, event.project_name),
+            exclusive=True,
+            name=f"project-menu-{event.action}",
+        )
 
     async def _cmd_clear(self) -> None:
         await chat_commands.cmd_clear(self)

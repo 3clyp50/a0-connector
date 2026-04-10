@@ -468,87 +468,138 @@ Footer {
 }
 
 ChatListScreen {
-    align: left top;
+    align: center middle;
+    background: transparent;
 }
 
-#chat-list-panel {
-    width: 100%;
-    min-width: 100%;
-    max-height: 100%;
-    padding: 1;
-    scrollbar-size: 1 1;
+#chat-list-box {
+    width: 84%;
+    max-width: 108;
+    max-height: 88%;
+    border: round #0f6db8;
+    background: #101820;
+    padding: 1 2;
 }
 
 #chat-list-title {
     text-style: bold;
+}
+
+#chat-list-description {
     margin-bottom: 1;
+    color: #7f8c98;
 }
 
 #chat-list-empty {
-    color: $text-muted;
+    color: #7f8c98;
     height: 3;
     content-align: center middle;
 }
 
 #chat-list {
     height: 1fr;
-    border: solid $primary;
+    border: round #2a3a4a;
+    background: #111820;
+    padding: 0 1;
 }
 
-ProjectMenuScreen {
-    align: right top;
+#chat-list > ListItem {
+    margin: 0;
+    padding: 0;
+    border-bottom: solid #1d2a36;
 }
 
-#project-menu-box {
-    width: 44;
-    max-height: 85%;
-    margin-top: 1;
-    margin-right: 2;
+#chat-list > ListItem.-highlight,
+#chat-list > ListItem.-hovered {
+    background: #172533;
+}
+
+.chat-list-item-body {
+    width: 100%;
+    height: auto;
+    padding: 1 1 0 1;
+    background: transparent;
+}
+
+.chat-list-item-title {
+    width: 100%;
+    color: #d9e2ec;
+    text-style: bold;
+    overflow-x: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-list-item-meta {
+    width: 100%;
+    color: #7f8c98;
+    overflow-x: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-list-item-preview {
+    width: 100%;
+    margin-bottom: 1;
+    color: #b8c4cf;
+    overflow-x: hidden;
+    text-overflow: ellipsis;
+}
+
+#chat-list > ListItem.-highlight .chat-list-item-title {
+    color: #f5f7fa;
+}
+
+#chat-list > ListItem.-highlight .chat-list-item-meta,
+#chat-list > ListItem.-highlight .chat-list-item-preview {
+    color: #9ecfff;
+}
+
+#project-menu-popover {
+    layer: status;
+    dock: right;
+    width: 38;
+    height: auto;
+    min-height: 0;
+    max-height: 16;
+    margin: 1 2 0 0;
     border: round #0f6db8;
     background: #101820;
     padding: 1;
 }
 
-#project-menu-title {
-    text-style: bold;
-    margin-bottom: 1;
-}
-
-.project-menu-action,
-.project-menu-project {
+.project-menu-item {
     width: 100%;
-    margin-top: 1;
+    height: 1;
+    min-height: 1;
+    margin: 0;
+    padding: 0 1;
     background: transparent;
-    border: round transparent;
+    border: none;
     color: #d9e2ec;
     content-align: left middle;
 }
 
-.project-menu-action:hover,
-.project-menu-project:hover {
+.project-menu-item:hover,
+.project-menu-item:focus {
     background: #172533;
 }
 
-.project-menu-action:focus,
-.project-menu-project:focus {
-    border: round #00b4ff;
-}
-
-.project-menu-project:disabled {
+.project-menu-item.-disabled {
     background: #111820;
     color: #7f8c98;
     opacity: 1;
 }
 
 .project-menu-section {
+    height: 1;
+    min-height: 1;
     margin-top: 1;
     color: #7f8c98;
 }
 
 #project-menu-items {
     height: auto;
-    max-height: 18;
-    margin-top: 1;
+    max-height: 8;
+    margin-top: 0;
 }
 
 #project-menu-empty {

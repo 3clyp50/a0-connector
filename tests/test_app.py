@@ -19,7 +19,6 @@ from agent_zero_cli.screens.project_instructions import (
     ProjectInstructionsResult,
     ProjectInstructionsScreen,
 )
-from agent_zero_cli.screens.project_menu import ProjectMenuResult, ProjectMenuScreen
 from agent_zero_cli.widgets.command_palette import AgentCommandPalette
 from agent_zero_cli.widgets.chat_log import (
     _AGENT_ZERO_BANNER,
@@ -27,7 +26,7 @@ from agent_zero_cli.widgets.chat_log import (
     _AGENT_ZERO_BANNER_TINY,
     _select_agent_zero_banner,
 )
-from agent_zero_cli.widgets import ConnectionStatus, DynamicFooter, SplashState
+from agent_zero_cli.widgets import ConnectionStatus, DynamicFooter, ProjectMenuItem, ProjectMenuPopover, SplashState
 from agent_zero_cli.widgets.splash_view import (
     SplashHostPanel,
     SplashLoginPanel,
@@ -278,6 +277,18 @@ class ConnectionStatusHarnessApp(App[None]):
         yield ConnectionStatus(id="connection-status")
 
 
+class ProjectMenuHarnessApp(App[None]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.project_actions: list[tuple[str, str | None]] = []
+
+    def compose(self) -> ComposeResult:
+        yield Static("host")
+
+    def on_project_menu_item_selected(self, event: ProjectMenuItem.Selected) -> None:
+        self.project_actions.append((event.action, event.project_name))
+
+
 @pytest.fixture
 def dummy_app(monkeypatch: pytest.MonkeyPatch) -> DummyAgentZeroCLI:
     app = DummyAgentZeroCLI()
@@ -461,7 +472,7 @@ async def test_project_menu_accepts_core_rgba_hex_colors() -> None:
     app = ConnectionStatusHarnessApp()
 
     async with app.run_test(size=(100, 20)) as pilot:
-        screen = ProjectMenuScreen(
+        popover = ProjectMenuPopover(
             [
                 {
                     "name": "project_1",
@@ -471,12 +482,39 @@ async def test_project_menu_accepts_core_rgba_hex_colors() -> None:
                 }
             ],
             current_project=None,
+            id="project-menu-popover",
         )
-        app.push_screen(screen)
+        await app.mount(popover)
         await pilot.pause(0.1)
 
-        button = screen.query_one("#project-menu-switch-project_1", Button)
-        assert button.label.plain == "● Project #1  /project_1"
+        button = app.query_one("#project-menu-switch-project_1", ProjectMenuItem)
+        assert button.render().plain == "● Project #1  /project_1"
+
+
+async def test_project_menu_item_click_posts_selection_message() -> None:
+    app = ProjectMenuHarnessApp()
+
+    async with app.run_test(size=(100, 20)) as pilot:
+        popover = ProjectMenuPopover(
+            [
+                {
+                    "name": "project_1",
+                    "title": "Project #1",
+                    "description": "",
+                    "color": "#002975ff",
+                }
+            ],
+            current_project=None,
+            id="project-menu-popover",
+        )
+        await app.mount(popover)
+        await pilot.pause(0.1)
+
+        button = app.query_one("#project-menu-switch-project_1", ProjectMenuItem)
+        button.on_click()
+        await pilot.pause(0.1)
+
+        assert app.project_actions == [("activate", "project_1")]
 
 
 def test_connection_target_summary_handles_invalid_port() -> None:
@@ -1360,7 +1398,23 @@ def test_system_commands_include_project_when_feature_advertised(dummy_app: Dumm
     assert titles == ["/new", "/chats", "/project", "/compact", "/keys", "/help", "/quit"]
 
 
-async def test_project_command_activate_and_deactivate_update_header_without_reconnecting(
+async def test_project_command_opens_popover(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.connected = True
+    dummy_app.current_context = "ctx-1"
+    dummy_app.connector_features = {"projects"}
+
+    opened: list[bool] = []
+    monkeypatch.setattr(dummy_app, "_open_project_menu", lambda: opened.append(True) or _async_return(None))
+
+    await dummy_app._cmd_project()
+
+    assert opened == [True]
+
+
+async def test_project_menu_activate_and_deactivate_update_header_without_reconnecting(
     dummy_app: DummyAgentZeroCLI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1390,13 +1444,7 @@ async def test_project_command_activate_and_deactivate_update_header_without_rec
     monkeypatch.setattr(dummy_app.client, "activate_project", lambda context_id, name: _async_return(activated_payload))
     monkeypatch.setattr(dummy_app.client, "deactivate_project", lambda context_id: _async_return(deactivated_payload))
 
-    async def activate_menu(screen):
-        assert isinstance(screen, ProjectMenuScreen)
-        return ProjectMenuResult(action="activate", project_name="atlas")
-
-    monkeypatch.setattr(dummy_app, "push_screen_wait", activate_menu)
-
-    await dummy_app._cmd_project()
+    await dummy_app._handle_project_menu_action("activate", "atlas")
 
     assert dummy_app.current_project == {
         "name": "atlas",
@@ -1408,13 +1456,7 @@ async def test_project_command_activate_and_deactivate_update_header_without_rec
 
     monkeypatch.setattr(dummy_app.client, "get_projects", lambda context_id: _async_return(activated_payload))
 
-    async def deactivate_menu(screen):
-        assert isinstance(screen, ProjectMenuScreen)
-        return ProjectMenuResult(action="deactivate", project_name="atlas")
-
-    monkeypatch.setattr(dummy_app, "push_screen_wait", deactivate_menu)
-
-    await dummy_app._cmd_project()
+    await dummy_app._handle_project_menu_action("deactivate", "atlas")
 
     assert dummy_app.current_project is None
     assert dummy_app._test_widgets["#connection-status"].current_project is None
@@ -1465,15 +1507,13 @@ async def test_project_edit_opens_instructions_editor_and_saves_full_payload(
     )
 
     async def fake_push_screen_wait(screen):
-        if isinstance(screen, ProjectMenuScreen):
-            return ProjectMenuResult(action="edit", project_name="atlas")
         if isinstance(screen, ProjectInstructionsScreen):
             return ProjectInstructionsResult(instructions="Updated instructions")
         raise AssertionError(f"Unexpected screen: {type(screen)!r}")
 
     monkeypatch.setattr(dummy_app, "push_screen_wait", fake_push_screen_wait)
 
-    await dummy_app._cmd_project()
+    await dummy_app._handle_project_menu_action("edit", "atlas")
 
     assert update_calls == [
         {

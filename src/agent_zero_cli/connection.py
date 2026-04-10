@@ -75,6 +75,7 @@ async def begin_connection(
     app._stop_remote_tree_publisher()
     app._stop_token_refresh()
     app._clear_token_usage()
+    await app._hide_project_menu()
     app._clear_project_state()
     app._last_remote_tree_hash = ""
     normalized_host = app._normalize_host(host)
@@ -305,6 +306,8 @@ def set_connected(app: AgentZeroCLI, value: bool) -> None:
     input_widget = app.query_one("#message-input", ChatInput)
     input_widget.disabled = not value
     if not value:
+        if app.is_running:
+            asyncio.create_task(app._hide_project_menu())
         app._cancel_compaction_refresh()
         app._set_pause_latched(False)
         app._stop_remote_tree_publisher()

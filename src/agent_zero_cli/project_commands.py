@@ -7,8 +7,6 @@ from agent_zero_cli.screens.project_instructions import (
     ProjectInstructionsResult,
     ProjectInstructionsScreen,
 )
-from agent_zero_cli.screens.project_menu import ProjectMenuResult, ProjectMenuScreen
-
 if TYPE_CHECKING:
     from agent_zero_cli.app import AgentZeroCLI
 
@@ -19,26 +17,24 @@ async def cmd_project(app: AgentZeroCLI) -> None:
         app._show_notice(availability.reason or "Projects are unavailable right now.", error=True)
         return
 
-    await app._refresh_projects(context_id=app.current_context, silent=False)
-    result = await app.push_screen_wait(
-        ProjectMenuScreen(
-            app.project_list,
-            current_project=app.current_project,
-        )
-    )
-    if not isinstance(result, ProjectMenuResult):
+    await app._open_project_menu()
+
+async def handle_project_menu_action(
+    app: AgentZeroCLI,
+    action: str,
+    *,
+    project_name_value: str | None = None,
+) -> None:
+    if action == "activate" and project_name_value:
+        await _activate_project(app, project_name_value)
         return
 
-    if result.action == "activate" and result.project_name:
-        await _activate_project(app, result.project_name)
-        return
-
-    if result.action == "deactivate":
+    if action == "deactivate":
         await _deactivate_project(app)
         return
 
-    if result.action == "edit" and result.project_name:
-        await _edit_project_instructions(app, result.project_name)
+    if action == "edit" and project_name_value:
+        await _edit_project_instructions(app, project_name_value)
 
 
 async def _activate_project(app: AgentZeroCLI, project_name_value: str) -> None:

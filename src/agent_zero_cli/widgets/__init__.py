@@ -6,6 +6,7 @@ from agent_zero_cli.widgets.model_switcher_bar import (
     ModelPreset,
     ModelSwitcherBar,
 )
+from agent_zero_cli.widgets.project_menu_popover import ProjectMenuItem, ProjectMenuPopover
 from agent_zero_cli.widgets.splash_view import (
     SplashAction,
     SplashLoginPanel,
@@ -22,6 +23,8 @@ __all__ = [
     "ModelIdentity",
     "ModelPreset",
     "ModelSwitcherBar",
+    "ProjectMenuItem",
+    "ProjectMenuPopover",
     "SplashAction",
     "SplashLoginPanel",
     "SplashState",
