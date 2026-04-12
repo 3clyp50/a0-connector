@@ -881,6 +881,35 @@ SplashStatusPanel {
     border: round #00b4ff;
 }
 
+#splash-status-actions {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+#splash-status-back {
+    width: 16;
+    height: auto;
+    margin-top: 0;
+    margin-right: 1;
+    background: transparent;
+    color: #80d0ff;
+    border: round #2a3a4a;
+    text-style: bold;
+}
+
+#splash-status-back:focus {
+    background: #172533;
+    color: #f5f7fa;
+    border: round #00b4ff;
+}
+
+#splash-status-back:disabled {
+    color: #7f8b97;
+    border: round #2a3a4a;
+}
+
 #splash-host-input,
 #splash-login-username,
 #splash-login-password {
@@ -922,6 +951,11 @@ SplashStatusPanel {
     background: #1c2732;
     color: #7f8b97;
     border: round #2a3a4a;
+}
+
+#splash-status-retry {
+    width: 1fr;
+    margin-top: 0;
 }
 
 #splash-manual-section {
