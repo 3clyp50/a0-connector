@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +19,18 @@ def test_unix_installer_lets_uv_manage_python() -> None:
     assert "python_ok" not in installer
     assert "--no-python-downloads" not in installer
     assert '--python "$PYTHON_CMD"' not in installer
-    assert 'git+https://github.com/agent0ai/a0-connector' in installer
+    assert 'a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip' in installer
     assert 'uv tool install --upgrade "$PACKAGE_SPEC"' in installer
+
+
+def test_unix_installer_is_sh_compatible() -> None:
+    result = subprocess.run(
+        ["sh", "-n", str(ROOT / "install.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_windows_installer_lets_uv_manage_python() -> None:
@@ -28,8 +39,9 @@ def test_windows_installer_lets_uv_manage_python() -> None:
     assert "Test-PythonCommand" not in installer
     assert "--no-python-downloads" not in installer
     assert '"--python"' not in installer
-    assert 'git+https://github.com/agent0ai/a0-connector' in installer
+    assert 'a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip' in installer
     assert '$installArgs = @("tool", "install", "--upgrade", $PackageSpec)' in installer
+    assert 'if ($LASTEXITCODE -ne 0)' in installer
 
 
 def test_readme_documents_uv_managed_python_and_git_install() -> None:
@@ -37,7 +49,8 @@ def test_readme_documents_uv_managed_python_and_git_install() -> None:
     compact = " ".join(readme.split())
     assert "raw.githubusercontent.com/agent0ai/a0-connector/main/install.sh" in compact
     assert "raw.githubusercontent.com/agent0ai/a0-connector/main/install.ps1" in compact
-    assert "directly from GitHub" in compact
-    assert "uv tool install git+https://github.com/agent0ai/a0-connector" in compact
+    assert "directly from a GitHub source archive" in compact
+    assert 'uv tool install "a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip"' in compact
     assert "will pick a compatible Python" in compact
     assert "download one if needed" in compact
+    assert "without requiring `git` to be installed" in readme

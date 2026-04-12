@@ -33,12 +33,12 @@ a0
 
 ## Manual install
 
-If you already use `uv`, you can install the CLI directly from GitHub. `uv`
-will pick a compatible Python for the tool environment and can download one if
-needed:
+If you already use `uv`, you can install the CLI directly from a GitHub source
+archive. `uv` will pick a compatible Python for the tool environment and can
+download one if needed, without requiring `git` to be installed:
 
 ```bash
-uv tool install git+https://github.com/agent0ai/a0-connector
+uv tool install "a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip"
 ```
 
 Advanced one-off runs with `uvx` also work, but they are intentionally not the primary install path for this project.
