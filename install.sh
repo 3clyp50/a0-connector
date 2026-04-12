@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
-set -euo pipefail
+set -eu
 
-PACKAGE_SPEC="${A0_PACKAGE_SPEC:-git+https://github.com/agent0ai/a0-connector}"
+PACKAGE_SPEC="${A0_PACKAGE_SPEC:-a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip}"
 UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"
 
 have_cmd() {
@@ -35,8 +35,6 @@ EOF
 }
 
 main() {
-    local uv_bin_dir
-
     ensure_uv
 
     uv_bin_dir="$(uv tool dir --bin)"

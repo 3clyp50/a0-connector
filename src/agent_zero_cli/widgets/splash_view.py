@@ -26,6 +26,8 @@ _STAGE_LABELS: dict[SplashStage, str] = {
     "ready": "Ready",
     "error": "Connection issue",
 }
+
+
 def _connection_target_summary(host: str) -> tuple[str, str, bool]:
     normalized_host = host.strip() or DEFAULT_HOST
     try:
@@ -65,7 +67,7 @@ def _validate_connection_target(host: str) -> tuple[bool, str]:
     try:
         parsed = urlparse(raw_host)
     except ValueError:
-        return False, "Invalid URL format. Use http://host[:port]."
+        return False, "Invalid URL format. Use http://host[:port] or https://host[:port]."
 
     scheme = (parsed.scheme or "").lower()
     if scheme not in {"http", "https"}:
@@ -80,7 +82,7 @@ def _validate_connection_target(host: str) -> tuple[bool, str]:
         return False, "Invalid URL format. Port must be numeric."
 
     if port is None:
-        return False, "Missing port. Include :port (for example :5080)."
+        return True, "URL format looks valid. Standard ports 80/443 are optional."
 
     return True, "URL format looks valid."
 
@@ -188,7 +190,7 @@ class SplashHostPanel(Vertical):
         self._manual_toggle = Button("Enter URL manually", id="splash-host-toggle-manual")
         self._manual_title = Static("Manual URL", classes="splash-panel-title", id="splash-manual-title")
         self._manual_copy = Static(
-            "Use this for remote Agent Zero hosts or anything Docker cannot see.",
+            "Use this for remote Agent Zero hosts or anything Docker cannot see. Standard ports are optional.",
             classes="splash-panel-copy",
         )
         self._hint = Static(
@@ -524,18 +526,26 @@ class SplashStatusPanel(Vertical):
         self._spinner = LoadingIndicator(id="splash-status-spinner")
         self._title = Static("", id="splash-status-title")
         self._detail = Static("", id="splash-status-detail")
+        self._actions = Horizontal(id="splash-status-actions")
+        self._back_button = Button("Back", id="splash-status-back")
         self._button = Button("Try again", id="splash-status-retry", variant="primary")
         self._spinner.display = True
+        self._actions.display = False
+        self._back_button.display = False
         self._button.display = False
 
     def compose(self) -> ComposeResult:
         yield self._spinner
         yield self._title
         yield self._detail
-        yield self._button
+        with self._actions:
+            yield self._back_button
+            yield self._button
 
     def set_connecting(self, message: str, detail: str = "") -> None:
         self._spinner.display = True
+        self._actions.display = False
+        self._back_button.display = False
         self._button.display = False
         self._title.display = True
         self._detail.display = True
@@ -544,11 +554,23 @@ class SplashStatusPanel(Vertical):
 
     def set_error(self, message: str, detail: str = "") -> None:
         self._spinner.display = False
+        self._actions.display = True
+        self._back_button.display = True
         self._button.display = True
         self._title.display = False
         self._detail.display = False
         self._title.update("")
         self._detail.update("")
+
+    def focus_primary(self) -> None:
+        try:
+            if self._back_button.display:
+                self._back_button.focus()
+                return
+            if self._button.display:
+                self._button.focus()
+        except Exception:
+            pass
 
 
 class SplashActionCard(Vertical):
@@ -779,7 +801,7 @@ class SplashView(VerticalScroll):
         self._state = state
         if self.is_mounted:
             self._sync_state()
-            if state.stage in {"host", "login"}:
+            if state.stage in {"host", "login", "error"}:
                 self.focus_primary()
 
     def set_stage(
@@ -839,6 +861,8 @@ class SplashView(VerticalScroll):
             self._host_panel.focus_input()
         elif self._state.stage == "login":
             self._login_panel.focus_input()
+        elif self._state.stage == "error":
+            self._status_panel.focus_primary()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -865,6 +889,10 @@ class SplashView(VerticalScroll):
 
         if button_id == "splash-status-retry":
             self.post_message(self.ActionRequested("retry"))
+            return
+
+        if button_id == "splash-status-back":
+            self._request_back_to_host()
             return
 
         action_key = self._actions.action_for_button_id(button_id)
@@ -927,7 +955,7 @@ class SplashView(VerticalScroll):
         )
 
     def on_key(self, event: events.Key) -> None:
-        if event.key == "escape" and self._state.stage == "login":
+        if event.key == "escape" and self._state.stage in {"login", "error"}:
             self._request_back_to_host()
             event.stop()
 
