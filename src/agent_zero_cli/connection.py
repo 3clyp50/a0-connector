@@ -206,7 +206,8 @@ async def begin_connection(
 
     try:
         await app.client.connect_websocket()
-        await app.client.send_hello()
+        hello = await app.client.send_hello()
+        app._python_tty.set_exec_config(hello.get("exec_config") if isinstance(hello, dict) else None)
     except Exception as exc:
         app._sync_connection_status("disconnected", normalized_host)
         app._set_splash_stage(
@@ -302,6 +303,7 @@ def _reset_disconnected_state(app: AgentZeroCLI) -> None:
     app._clear_token_usage()
     app._clear_project_state()
     app._set_workspace_context(remote_workspace="")
+    app._python_tty.set_exec_config(None)
     asyncio.create_task(app._python_tty.close())
     app._clear_model_switcher()
     app._sync_body_mode()

@@ -11,6 +11,10 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = PROJECT_ROOT / "plugin"
+if not (PLUGIN_ROOT / "_a0_connector").exists():
+    sibling_root = PROJECT_ROOT.parent / "agent-zero" / "plugins"
+    if (sibling_root / "_a0_connector").exists():
+        PLUGIN_ROOT = sibling_root
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -41,7 +45,11 @@ def _reset_modules() -> None:
     _purge_modules()
 
 
-def _install_fake_helpers(*, auth_required: bool = False) -> None:
+def _install_fake_helpers(
+    *,
+    auth_required: bool = False,
+    code_execution_config: dict[str, object] | None = None,
+) -> None:
     plugins_pkg = _make_package("plugins", path=PLUGIN_ROOT)
     _make_package("plugins._model_config")
     _make_package("plugins._model_config.helpers")
@@ -51,6 +59,7 @@ def _install_fake_helpers(*, auth_required: bool = False) -> None:
     helpers_pkg = _make_package("helpers")
     api_mod = types.ModuleType("helpers.api")
     login_mod = types.ModuleType("helpers.login")
+    plugins_mod = types.ModuleType("helpers.plugins")
     print_style_mod = types.ModuleType("helpers.print_style")
     ws_mod = types.ModuleType("helpers.ws")
     ws_manager_mod = types.ModuleType("helpers.ws_manager")
@@ -111,18 +120,23 @@ def _install_fake_helpers(*, auth_required: bool = False) -> None:
     api_mod.Request = Request
     api_mod.Response = Response
     login_mod.is_login_required = lambda: auth_required
+    plugins_mod.get_plugin_config = lambda plugin_name, **kwargs: (
+        code_execution_config if plugin_name == "_code_execution" else {}
+    )
     print_style_mod.PrintStyle = PrintStyle
     ws_mod.WsHandler = WsHandler
     ws_manager_mod.WsResult = WsResult
 
     sys.modules["helpers.api"] = api_mod
     sys.modules["helpers.login"] = login_mod
+    sys.modules["helpers.plugins"] = plugins_mod
     sys.modules["helpers.print_style"] = print_style_mod
     sys.modules["helpers.ws"] = ws_mod
     sys.modules["helpers.ws_manager"] = ws_manager_mod
 
     helpers_pkg.api = api_mod
     helpers_pkg.login = login_mod
+    helpers_pkg.plugins = plugins_mod
     helpers_pkg.print_style = print_style_mod
     helpers_pkg.ws = ws_mod
     helpers_pkg.ws_manager = ws_manager_mod
@@ -231,7 +245,20 @@ def test_event_bridge_uses_log_output_cursor() -> None:
 
 
 def test_ws_connector_hello_advertises_remote_exec_and_tree_features() -> None:
-    _install_fake_helpers()
+    _install_fake_helpers(
+        code_execution_config={
+            "code_exec_first_output_timeout": 12,
+            "code_exec_between_output_timeout": 8,
+            "code_exec_max_exec_timeout": 60,
+            "code_exec_dialog_timeout": 2,
+            "output_first_output_timeout": 24,
+            "output_between_output_timeout": 12,
+            "output_max_exec_timeout": 120,
+            "output_dialog_timeout": 3,
+            "prompt_patterns": "PS .+> ?$",
+            "dialog_patterns": "yes/no",
+        }
+    )
     ws_connector_mod = _reload("plugins._a0_connector.api.ws_connector")
 
     payload = asyncio.run(ws_connector_mod.WsConnector(None, None).process("connector_hello", {}, "sid-1"))
@@ -239,6 +266,11 @@ def test_ws_connector_hello_advertises_remote_exec_and_tree_features() -> None:
     assert payload["protocol"] == "a0-connector.v1"
     assert "remote_file_tree" in payload["features"]
     assert "code_execution_remote" in payload["features"]
+    assert payload["exec_config"]["version"] == 1
+    assert payload["exec_config"]["code_exec_timeouts"]["first_output_timeout"] == 12
+    assert payload["exec_config"]["output_timeouts"]["max_exec_timeout"] == 120
+    assert payload["exec_config"]["prompt_patterns"] == ["PS .+> ?$"]
+    assert payload["exec_config"]["dialog_patterns"] == ["yes/no"]
 
 
 def test_ws_connector_exec_result_resolves_pending_future() -> None:

@@ -214,6 +214,36 @@ async def test_send_message_uses_prefixed_ws_event() -> None:
     assert payload["client_message_id"]
 
 
+async def test_send_hello_returns_exec_config_payload() -> None:
+    client = A0Client("http://127.0.0.1:50001")
+    client.sio = FakeSocketIOClient(
+        call_response={
+            "results": [
+                {
+                    "ok": True,
+                    "data": {
+                        "protocol": "a0-connector.v1",
+                        "features": ["code_execution_remote"],
+                        "exec_config": {
+                            "version": 1,
+                            "code_exec_timeouts": {"first_output_timeout": 30},
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    result = await client.send_hello()
+
+    assert result["protocol"] == "a0-connector.v1"
+    assert result["exec_config"]["version"] == 1
+    event, payload, namespace = client.sio.call_calls[0]
+    assert event == "connector_hello"
+    assert namespace == "/ws"
+    assert payload["protocol"] == "a0-connector.v1"
+
+
 async def test_pause_agent_normalizes_http_failure() -> None:
     client = A0Client("http://localhost:5080")
     client.http = Mock()

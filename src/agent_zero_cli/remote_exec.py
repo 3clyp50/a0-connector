@@ -1,57 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-import importlib.util
+import base64
+import locale
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
-import types
+import uuid
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-_CORE_ROOT_ENV = "AGENT_ZERO_CORE_ROOT"
-_CORE_ROOT_CANDIDATES = (
-    "/a0",
-)
-_CORE_REQUIRED_FILES = (
-    "helpers/runtime.py",
-    "plugins/_code_execution/default_config.yaml",
-    "plugins/_code_execution/helpers/tty_session.py",
-    "plugins/_code_execution/helpers/shell_local.py",
-    "plugins/_code_execution/helpers/shell_ssh.py",
-)
-_CORE_MODULE_NAMES = (
-    "helpers",
-    "helpers.runtime",
-    "plugins",
-    "plugins._code_execution",
-    "plugins._code_execution.helpers",
-    "plugins._code_execution.helpers.tty_session",
-    "plugins._code_execution.helpers.shell_local",
-    "plugins._code_execution.helpers.shell_ssh",
-)
-_CORE_OPTIONAL_STUB_MODULE_NAMES = (
-    "helpers.dotenv",
-    "helpers.rfc",
-    "helpers.settings",
-    "helpers.files",
-    "helpers.log",
-    "helpers.print_style",
-)
-_CORE_OPTIONAL_DEPENDENCY_STUB_NAMES = (
-    "nest_asyncio",
-    "paramiko",
-)
-_CORE_PACKAGE_PATHS = {
-    "helpers": "helpers",
-    "plugins": "plugins",
-    "plugins._code_execution": "plugins/_code_execution",
-    "plugins._code_execution.helpers": "plugins/_code_execution/helpers",
-}
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _HEX_ESCAPE_RE = re.compile(r"(?<!\\)\\x[0-9A-Fa-f]{2}")
 _TIMEOUT_KEYS = (
     "first_output_timeout",
@@ -61,11 +23,31 @@ _TIMEOUT_KEYS = (
 )
 _SUPPORTED_RUNTIMES = ("terminal", "python", "nodejs", "output", "reset", "input")
 
-_NO_CORE_ERROR = (
-    "Remote execution is unavailable because Agent Zero Core could not be found. "
-    "Set AGENT_ZERO_CORE_ROOT or ensure /a0 exists "
-    "on this machine."
+_DEFAULT_CODE_EXEC_TIMEOUTS = {
+    "first_output_timeout": 30,
+    "between_output_timeout": 15,
+    "max_exec_timeout": 180,
+    "dialog_timeout": 5,
+}
+_DEFAULT_OUTPUT_TIMEOUTS = {
+    "first_output_timeout": 90,
+    "between_output_timeout": 45,
+    "max_exec_timeout": 300,
+    "dialog_timeout": 5,
+}
+_DEFAULT_PROMPT_PATTERNS = (
+    r"(\(venv\)).+[$#] ?$",
+    r"root@[^:]+:[^#]+# ?$",
+    r"[a-zA-Z0-9_.-]+@[^:]+:[^$#]+[$#] ?$",
+    r"\(?.*\)?\s*PS\s+[^>]+> ?$",
 )
+_DEFAULT_DIALOG_PATTERNS = (
+    r"Y/N",
+    r"yes/no",
+    r":\s*$",
+    r"\?\s*$",
+)
+
 _EXEC_DISABLED_ERROR = (
     "Remote execution is disabled in this CLI session. Press F4 to switch exec on."
 )
@@ -95,337 +77,351 @@ _PAUSE_DIALOG_MESSAGE = (
 )
 _RESET_MESSAGE = "Terminal session has been reset."
 
-
-class CoreRuntimeUnavailableError(RuntimeError):
-    """Raised when the local A0 Core tree needed for remote exec is unavailable."""
+_PYTHON_CODE_ENV = "A0_PY_CODE"
+_NODE_CODE_ENV = "A0_NODE_CODE"
+_MARKER_PREFIX = "__A0_DONE__"
 
 
 @dataclass(frozen=True)
-class _CoreRuntime:
-    root: Path
-    terminal_executable: str
-    get_terminal_executable: Callable[[], str]
-    tty_session_type: type[Any]
-    shell_session_type: type[Any]
-    clean_string: Callable[[str], str]
+class _ExecConfig:
+    version: int
     code_exec_timeouts: dict[str, int]
     output_timeouts: dict[str, int]
-    prompt_patterns: list[re.Pattern[str]]
-    dialog_patterns: list[re.Pattern[str]]
+    prompt_patterns: tuple[re.Pattern[str], ...]
+    dialog_patterns: tuple[re.Pattern[str], ...]
 
 
 @dataclass
 class _SessionState:
-    shell: Any
+    shell: "LocalShellSession"
     running: bool = False
 
 
-_CORE_RUNTIME_CACHE: _CoreRuntime | None = None
-_CORE_CREATED_STUBS: set[str] = set()
+def _parse_patterns(raw: Any, flags: int = 0) -> tuple[re.Pattern[str], ...]:
+    if isinstance(raw, (list, tuple)):
+        lines = [str(value) for value in raw]
+    else:
+        lines = str(raw or "").splitlines()
+    return tuple(re.compile(line.strip(), flags) for line in lines if line.strip())
 
 
-def _path_is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _resolve_core_root() -> Path | None:
-    candidates: list[str] = []
-    env_root = os.environ.get(_CORE_ROOT_ENV, "").strip()
-    if env_root:
-        candidates.append(env_root)
-    candidates.extend(_CORE_ROOT_CANDIDATES)
-
-    for candidate in candidates:
-        root = Path(candidate).expanduser()
-        if not root.exists():
-            continue
-        if all((root / rel_path).exists() for rel_path in _CORE_REQUIRED_FILES):
-            return root.resolve()
-    return None
-
-
-def _prepare_core_imports(root: Path) -> None:
-    root_str = str(root)
-    if root_str in sys.path:
-        sys.path.remove(root_str)
-    sys.path.insert(0, root_str)
-
-    for name in (*_CORE_MODULE_NAMES, *_CORE_OPTIONAL_STUB_MODULE_NAMES):
-        module = sys.modules.get(name)
-        if module is None:
-            continue
-        module_file = getattr(module, "__file__", None)
-        if not module_file:
-            sys.modules.pop(name, None)
-            continue
-        if not _path_is_relative_to(Path(module_file), root):
-            sys.modules.pop(name, None)
-
-
-def _ensure_core_package(root: Path, name: str) -> types.ModuleType:
-    existing = sys.modules.get(name)
-    package_path = str(root / _CORE_PACKAGE_PATHS[name])
-    if existing is not None:
-        paths = list(getattr(existing, "__path__", []))
-        if package_path not in paths:
-            existing.__path__ = [*paths, package_path]
-        return existing
-
-    module = types.ModuleType(name)
-    module.__package__ = name
-    module.__path__ = [package_path]
-    sys.modules[name] = module
-
-    parent_name, _, attr = name.rpartition(".")
-    if parent_name:
-        parent = _ensure_core_package(root, parent_name)
-        setattr(parent, attr, module)
-
-    return module
-
-
-def _make_core_stub_module(name: str) -> types.ModuleType:
-    module = types.ModuleType(name)
-
-    if name == "helpers.rfc":
-        module.RFCCall = type("RFCCall", (), {})
-    elif name == "helpers.log":
-        module.Log = type("Log", (), {})
-    elif name == "helpers.print_style":
-        module.PrintStyle = type(
-            "PrintStyle",
-            (),
-            {"standard": staticmethod(lambda *args, **kwargs: None)},
-        )
-    elif name == "nest_asyncio":
-        module.apply = lambda: None
-    elif name == "paramiko":
-        module.SSHClient = type("SSHClient", (), {})
-        module.AutoAddPolicy = type("AutoAddPolicy", (), {})
-
-    return module
-
-
-def _install_core_import_stubs(root: Path) -> None:
-    global _CORE_CREATED_STUBS
-
-    helpers_pkg = _ensure_core_package(root, "helpers")
-    for name in (
-        "helpers.dotenv",
-        "helpers.rfc",
-        "helpers.settings",
-        "helpers.files",
-        "helpers.log",
-        "helpers.print_style",
-    ):
-        module = _make_core_stub_module(name)
-        sys.modules[name] = module
-        setattr(helpers_pkg, name.rsplit(".", 1)[-1], module)
-        _CORE_CREATED_STUBS.add(name)
-
-    for name in _CORE_OPTIONAL_DEPENDENCY_STUB_NAMES:
-        if importlib.util.find_spec(name) is not None:
-            continue
-        sys.modules[name] = _make_core_stub_module(name)
-        _CORE_CREATED_STUBS.add(name)
-
-
-class _StreamWithNoOpReconfigure:
-    def __init__(self, wrapped: Any) -> None:
-        self._wrapped = wrapped
-
-    def reconfigure(self, **kwargs: Any) -> None:
-        return None
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._wrapped, name)
-
-
-def _load_core_module(root: Path, name: str, relative_path: str) -> Any:
-    parent_name, _, attr = name.rpartition(".")
-    if parent_name:
-        _ensure_core_package(root, parent_name)
-
-    module_path = root / relative_path
-    spec = importlib.util.spec_from_file_location(name, module_path)
-    if spec is None or spec.loader is None:
-        raise CoreRuntimeUnavailableError(
-            f"Remote execution is unavailable because {module_path} could not be loaded."
-        )
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-
-    if parent_name:
-        setattr(sys.modules[parent_name], attr, module)
-
-    original_stdin = sys.stdin
-    original_stdout = sys.stdout
-    patched_stdin = (
-        original_stdin
-        if hasattr(original_stdin, "reconfigure")
-        else _StreamWithNoOpReconfigure(original_stdin)
-    )
-    patched_stdout = (
-        original_stdout
-        if hasattr(original_stdout, "reconfigure")
-        else _StreamWithNoOpReconfigure(original_stdout)
-    )
-
-    try:
-        if patched_stdin is not original_stdin:
-            sys.stdin = patched_stdin  # type: ignore[assignment]
-        if patched_stdout is not original_stdout:
-            sys.stdout = patched_stdout  # type: ignore[assignment]
-        spec.loader.exec_module(module)
-    finally:
-        sys.stdin = original_stdin
-        sys.stdout = original_stdout
-    return module
-
-
-def _parse_scalar(raw_value: str) -> str | int | bool:
-    value = raw_value.strip()
-    if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
-        return value[1:-1]
-
-    lowered = value.lower()
-    if lowered in {"true", "false"}:
-        return lowered == "true"
-
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
-def _parse_default_config(config_path: Path) -> dict[str, Any]:
-    config: dict[str, Any] = {}
-    lines = config_path.read_text(encoding="utf-8").splitlines()
-    index = 0
-
-    while index < len(lines):
-        raw_line = lines[index]
-        stripped = raw_line.strip()
-
-        if not stripped or stripped.startswith("#"):
-            index += 1
-            continue
-
-        if ":" not in raw_line:
-            index += 1
-            continue
-
-        key, value = raw_line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-
-        if value == "|":
-            index += 1
-            block_lines: list[str] = []
-            while index < len(lines):
-                next_line = lines[index]
-                if next_line.startswith("  "):
-                    block_lines.append(next_line[2:])
-                    index += 1
-                    continue
-                if not next_line.strip():
-                    block_lines.append("")
-                    index += 1
-                    continue
-                break
-            config[key] = "\n".join(block_lines).rstrip("\n")
-            continue
-
-        config[key] = _parse_scalar(value)
-        index += 1
-
-    return config
-
-
-def _parse_patterns(raw: Any, flags: int = 0) -> list[re.Pattern[str]]:
-    lines = [str(value) for value in raw] if isinstance(raw, list) else str(raw).splitlines()
-    return [re.compile(line.strip(), flags) for line in lines if line.strip()]
-
-
-def _parse_timeout_group(config: dict[str, Any], prefix: str) -> dict[str, int]:
-    timeouts: dict[str, int] = {}
+def _coerce_timeout_group(raw: Any, defaults: dict[str, int]) -> dict[str, int]:
+    group = raw if isinstance(raw, dict) else {}
+    result: dict[str, int] = {}
     for key in _TIMEOUT_KEYS:
-        config_key = f"{prefix}_{key}"
-        if config_key not in config:
-            raise CoreRuntimeUnavailableError(
-                f"Remote execution is unavailable because {config_key!r} is missing from "
-                "Agent Zero Core _code_execution/default_config.yaml."
-            )
-        timeouts[key] = int(config[config_key])
-    return timeouts
+        value = group.get(key, defaults[key])
+        try:
+            result[key] = int(value)
+        except (TypeError, ValueError):
+            result[key] = defaults[key]
+    return result
 
 
-def _load_core_runtime() -> _CoreRuntime:
-    global _CORE_RUNTIME_CACHE
-
-    if _CORE_RUNTIME_CACHE is not None:
-        return _CORE_RUNTIME_CACHE
-
-    root = _resolve_core_root()
-    if root is None:
-        raise CoreRuntimeUnavailableError(_NO_CORE_ERROR)
-
-    _prepare_core_imports(root)
-    _install_core_import_stubs(root)
-
-    try:
-        runtime_mod = _load_core_module(root, "helpers.runtime", "helpers/runtime.py")
-        tty_mod = _load_core_module(
-            root,
-            "plugins._code_execution.helpers.tty_session",
-            "plugins/_code_execution/helpers/tty_session.py",
-        )
-        shell_ssh_mod = _load_core_module(
-            root,
-            "plugins._code_execution.helpers.shell_ssh",
-            "plugins/_code_execution/helpers/shell_ssh.py",
-        )
-        shell_local_mod = _load_core_module(
-            root,
-            "plugins._code_execution.helpers.shell_local",
-            "plugins/_code_execution/helpers/shell_local.py",
-        )
-        config = _parse_default_config(root / "plugins/_code_execution/default_config.yaml")
-        terminal_executable = str(runtime_mod.get_terminal_executable())
-    except Exception as exc:  # pragma: no cover - exercised via tests
-        raise CoreRuntimeUnavailableError(
-            "Remote execution is unavailable because Agent Zero Core could not be imported: "
-            f"{exc}"
-        ) from exc
-
-    _CORE_RUNTIME_CACHE = _CoreRuntime(
-        root=root,
-        terminal_executable=terminal_executable,
-        get_terminal_executable=runtime_mod.get_terminal_executable,
-        tty_session_type=tty_mod.TTYSession,
-        shell_session_type=shell_local_mod.LocalInteractiveSession,
-        clean_string=shell_ssh_mod.clean_string,
-        code_exec_timeouts=_parse_timeout_group(config, "code_exec"),
-        output_timeouts=_parse_timeout_group(config, "output"),
-        prompt_patterns=_parse_patterns(config.get("prompt_patterns", "")),
-        dialog_patterns=_parse_patterns(config.get("dialog_patterns", ""), re.IGNORECASE),
+def _default_exec_config() -> _ExecConfig:
+    return _ExecConfig(
+        version=1,
+        code_exec_timeouts=dict(_DEFAULT_CODE_EXEC_TIMEOUTS),
+        output_timeouts=dict(_DEFAULT_OUTPUT_TIMEOUTS),
+        prompt_patterns=_parse_patterns(_DEFAULT_PROMPT_PATTERNS),
+        dialog_patterns=_parse_patterns(_DEFAULT_DIALOG_PATTERNS, re.IGNORECASE),
     )
-    return _CORE_RUNTIME_CACHE
 
 
-def _reset_core_runtime_cache() -> None:
-    global _CORE_RUNTIME_CACHE
-    _CORE_RUNTIME_CACHE = None
-    for name in _CORE_MODULE_NAMES:
-        sys.modules.pop(name, None)
-    for name in list(_CORE_CREATED_STUBS):
-        sys.modules.pop(name, None)
-    _CORE_CREATED_STUBS.clear()
+def _normalize_exec_config(payload: dict[str, Any] | None) -> _ExecConfig:
+    if not isinstance(payload, dict):
+        return _default_exec_config()
+
+    defaults = _default_exec_config()
+    try:
+        version = int(payload.get("version", defaults.version))
+    except (TypeError, ValueError):
+        version = defaults.version
+
+    prompt_source = payload.get("prompt_patterns", list(_DEFAULT_PROMPT_PATTERNS))
+    dialog_source = payload.get("dialog_patterns", list(_DEFAULT_DIALOG_PATTERNS))
+
+    return _ExecConfig(
+        version=version,
+        code_exec_timeouts=_coerce_timeout_group(
+            payload.get("code_exec_timeouts"),
+            defaults.code_exec_timeouts,
+        ),
+        output_timeouts=_coerce_timeout_group(
+            payload.get("output_timeouts"),
+            defaults.output_timeouts,
+        ),
+        prompt_patterns=_parse_patterns(prompt_source),
+        dialog_patterns=_parse_patterns(dialog_source, re.IGNORECASE),
+    )
+
+
+def _clean_terminal_output(output: str) -> str:
+    cleaned = _ANSI_ESCAPE_RE.sub("", str(output or ""))
+    cleaned = cleaned.replace("\x00", "")
+    cleaned = cleaned.replace("\r\n", "\n")
+    cleaned = cleaned.replace("\r", "\n")
+    return cleaned.strip("\n")
+
+
+def _ps_single_quote(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _build_python_command(code: str) -> str:
+    encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    decoder = (
+        "import base64, os; exec(compile(base64.b64decode(os.environ['A0_PY_CODE'])."
+        "decode('utf-8'), '<a0-remote>', 'exec'))"
+    )
+    python_executable = sys.executable or "python"
+
+    if os.name == "nt":
+        encoded_ps = _ps_single_quote(encoded)
+        executable_ps = _ps_single_quote(python_executable)
+        return (
+            f"$env:{_PYTHON_CODE_ENV} = '{encoded_ps}'; "
+            f"& '{executable_ps}' -c \"{decoder}\"; "
+            "$__a0InnerExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }; "
+            f"Remove-Item Env:{_PYTHON_CODE_ENV} -ErrorAction SilentlyContinue; "
+            "$global:LASTEXITCODE = $__a0InnerExit"
+        )
+
+    return (
+        f"{_PYTHON_CODE_ENV}={shlex.quote(encoded)} "
+        f"{shlex.quote(python_executable)} -c {shlex.quote(decoder)}"
+    )
+
+
+def _build_node_command(code: str) -> str:
+    encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    decoder = (
+        "const src = Buffer.from(process.env.A0_NODE_CODE, 'base64').toString('utf8'); "
+        "(0, eval)(src);"
+    )
+
+    if os.name == "nt":
+        encoded_ps = _ps_single_quote(encoded)
+        return (
+            f"$env:{_NODE_CODE_ENV} = '{encoded_ps}'; "
+            f"& node -e \"{decoder}\"; "
+            "$__a0InnerExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }; "
+            f"Remove-Item Env:{_NODE_CODE_ENV} -ErrorAction SilentlyContinue; "
+            "$global:LASTEXITCODE = $__a0InnerExit"
+        )
+
+    return f"{_NODE_CODE_ENV}={shlex.quote(encoded)} node -e {shlex.quote(decoder)}"
+
+
+class LocalShellSession:
+    def __init__(self, *, cwd: str | None = None) -> None:
+        self.cwd = cwd
+        self.process: asyncio.subprocess.Process | None = None
+        self._reader_task: asyncio.Task[None] | None = None
+        self._state_lock = asyncio.Lock()
+        self._output_event = asyncio.Event()
+        self._raw_output = ""
+        self._display_output = ""
+        self._full_output_start = 0
+        self._last_reported_len = 0
+        self._marker_pattern: re.Pattern[str] | None = None
+        self._command_completed = False
+        self._closed = False
+
+    @property
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.returncode is None
+
+    @property
+    def command_completed(self) -> bool:
+        return self._command_completed
+
+    async def connect(self) -> None:
+        if self.is_alive:
+            return
+
+        cmd = self._shell_command()
+        self.process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=self.cwd or None,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self._closed = False
+        self._reader_task = asyncio.create_task(self._reader_loop())
+
+    async def close(self) -> None:
+        self._closed = True
+        process = self.process
+        self.process = None
+
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+        reader = self._reader_task
+        self._reader_task = None
+        if reader is not None:
+            try:
+                await reader
+            except Exception:
+                pass
+
+    async def send_command(self, command: str) -> None:
+        if not self.is_alive or self.process is None or self.process.stdin is None:
+            raise RuntimeError("Terminal session is not connected")
+
+        marker_pattern, wrapped = self._wrap_command(command)
+        async with self._state_lock:
+            self._raw_output = ""
+            self._display_output = ""
+            self._full_output_start = 0
+            self._last_reported_len = 0
+            self._marker_pattern = marker_pattern
+            self._command_completed = False
+            self._output_event.clear()
+
+        self.process.stdin.write(wrapped.encode("utf-8"))
+        await self.process.stdin.drain()
+
+    async def send_input(self, text: str) -> None:
+        if not self.is_alive or self.process is None or self.process.stdin is None:
+            raise RuntimeError("Terminal session is not connected")
+
+        payload = text
+        if not payload.endswith("\n"):
+            payload += "\n"
+
+        self.process.stdin.write(payload.encode("utf-8"))
+        await self.process.stdin.drain()
+
+    async def reset_output(self) -> None:
+        async with self._state_lock:
+            self._full_output_start = len(self._display_output)
+            self._last_reported_len = len(self._display_output)
+            self._output_event.clear()
+
+    async def read_output(
+        self,
+        *,
+        timeout: float = 0,
+        reset_full_output: bool = False,
+    ) -> tuple[str, str | None]:
+        if reset_full_output:
+            async with self._state_lock:
+                self._full_output_start = len(self._display_output)
+                self._last_reported_len = len(self._display_output)
+
+        if timeout > 0:
+            try:
+                await asyncio.wait_for(self._output_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+        elif timeout == 0:
+            await asyncio.sleep(0)
+
+        async with self._state_lock:
+            full_output = self._display_output[self._full_output_start :]
+            partial_output = self._display_output[self._last_reported_len :]
+            self._last_reported_len = len(self._display_output)
+            self._output_event.clear()
+
+        normalized_full = _clean_terminal_output(full_output)
+        normalized_partial = _clean_terminal_output(partial_output)
+        return normalized_full, (normalized_partial or None)
+
+    def _shell_command(self) -> list[str]:
+        if os.name == "nt":
+            executable = shutil.which("powershell.exe") or shutil.which("pwsh") or "powershell.exe"
+            return [
+                executable,
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-NoExit",
+                "-Command",
+                "-",
+            ]
+
+        shell = os.environ.get("SHELL", "").strip()
+        executable = ""
+        if shell:
+            executable = shutil.which(shell) or shell
+        if not executable:
+            executable = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+
+        if os.path.basename(executable) == "bash":
+            return [executable, "--noprofile", "--norc"]
+        return [executable]
+
+    def _wrap_command(self, command: str) -> tuple[re.Pattern[str], str]:
+        marker = f"{_MARKER_PREFIX}{uuid.uuid4().hex}__"
+        marker_pattern = re.compile(rf"(?:\r?\n|^){re.escape(marker)}:(-?\d+)\r?\n?")
+        body = command.rstrip("\n")
+
+        if os.name == "nt":
+            encoded_body = base64.b64encode(body.encode("utf-8")).decode("ascii")
+            wrapped = (
+                f"$__a0Body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_body}')); "
+                "$__a0Exit = 0; "
+                "try { "
+                "Invoke-Expression $__a0Body; "
+                "$__a0Exit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 } "
+                "} catch { "
+                "Write-Error $_; "
+                "$__a0Exit = 1 "
+                "}; "
+                'Write-Output ""; '
+                f'Write-Output "{marker}:$__a0Exit"\n'
+            )
+            return marker_pattern, wrapped
+
+        wrapped = (
+            f"{body}\n"
+            "__a0_exit=$?\n"
+            f"printf '\\n{marker}:%s\\n' \"$__a0_exit\"\n"
+        )
+        return marker_pattern, wrapped
+
+    async def _reader_loop(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            return
+
+        encoding = locale.getpreferredencoding(False) or "utf-8"
+        try:
+            while True:
+                chunk = await self.process.stdout.read(4096)
+                if not chunk:
+                    break
+                text = chunk.decode(encoding, errors="replace")
+                await self._append_output(text)
+        finally:
+            async with self._state_lock:
+                if self._marker_pattern is not None:
+                    self._command_completed = True
+                self._output_event.set()
+
+    async def _append_output(self, text: str) -> None:
+        async with self._state_lock:
+            self._raw_output += text
+            marker_pattern = self._marker_pattern
+            if marker_pattern is not None:
+                match = marker_pattern.search(self._raw_output)
+                if match:
+                    self._display_output = self._raw_output[: match.start()]
+                    self._raw_output = self._display_output
+                    self._marker_pattern = None
+                    self._command_completed = True
+                else:
+                    self._display_output = self._raw_output
+            else:
+                self._display_output = self._raw_output
+            self._output_event.set()
 
 
 class RemoteExecManager:
@@ -439,10 +435,14 @@ class RemoteExecManager:
         self.cwd = cwd
         self.enabled = enabled
         self.poll_interval = poll_interval
+        self._exec_config = _default_exec_config()
         self._sessions: dict[int, _SessionState] = {}
 
     def set_enabled(self, enabled: bool) -> None:
         self.enabled = enabled
+
+    def set_exec_config(self, payload: dict[str, Any] | None) -> None:
+        self._exec_config = _normalize_exec_config(payload)
 
     async def close(self) -> None:
         sessions = list(self._sessions.values())
@@ -518,23 +518,21 @@ class RemoteExecManager:
         return await self._run_shell_command(
             session=session,
             command=command,
-            timeouts=_load_core_runtime().code_exec_timeouts,
+            timeouts=self._exec_config.code_exec_timeouts,
         )
 
     async def execute_python(self, *, session: int, code: str) -> dict[str, Any]:
-        escaped_code = shlex.quote(code)
         return await self._run_shell_command(
             session=session,
-            command=f"ipython -c {escaped_code}",
-            timeouts=_load_core_runtime().code_exec_timeouts,
+            command=_build_python_command(code),
+            timeouts=self._exec_config.code_exec_timeouts,
         )
 
     async def execute_nodejs(self, *, session: int, code: str) -> dict[str, Any]:
-        escaped_code = shlex.quote(code)
         return await self._run_shell_command(
             session=session,
-            command=f"node /exe/node_eval.js {escaped_code}",
-            timeouts=_load_core_runtime().code_exec_timeouts,
+            command=_build_node_command(code),
+            timeouts=self._exec_config.code_exec_timeouts,
         )
 
     async def send_input(self, *, session: int, keyboard: str) -> dict[str, Any]:
@@ -545,18 +543,19 @@ class RemoteExecManager:
             )
 
         state = self._sessions[session]
-        await state.shell.send_command(keyboard.rstrip("\n"))
+        await state.shell.reset_output()
+        await state.shell.send_input(keyboard.rstrip("\n"))
         state.running = True
         return await self._get_terminal_output(
             session=session,
-            timeouts=_load_core_runtime().code_exec_timeouts,
-            reset_full_output=True,
+            timeouts=self._exec_config.code_exec_timeouts,
+            reset_full_output=False,
         )
 
     async def collect_output(self, *, session: int) -> dict[str, Any]:
         return await self._get_terminal_output(
             session=session,
-            timeouts=_load_core_runtime().output_timeouts,
+            timeouts=self._exec_config.output_timeouts,
             reset_full_output=False,
         )
 
@@ -570,6 +569,9 @@ class RemoteExecManager:
             "output": "",
             "running": False,
         }
+
+    def _create_shell_session(self) -> LocalShellSession:
+        return LocalShellSession(cwd=self.cwd)
 
     async def _run_shell_command(
         self,
@@ -587,28 +589,22 @@ class RemoteExecManager:
         return await self._get_terminal_output(
             session=session,
             timeouts=timeouts,
-            reset_full_output=True,
+            reset_full_output=False,
         )
 
     async def _ensure_session(self, session: int, *, reset: bool = False) -> _SessionState:
-        runtime = _load_core_runtime()
-
         if reset:
             existing = self._sessions.pop(session, None)
             if existing is not None:
                 await existing.shell.close()
 
         existing = self._sessions.get(session)
-        if existing is not None:
+        if existing is not None and existing.shell.is_alive:
             return existing
+        if existing is not None:
+            await existing.shell.close()
 
-        if not runtime.terminal_executable:
-            raise CoreRuntimeUnavailableError(
-                "Remote execution is unavailable because Agent Zero Core did not return "
-                "a terminal executable."
-            )
-
-        shell = runtime.shell_session_type(cwd=self.cwd)
+        shell = self._create_shell_session()
         await shell.connect()
         state = _SessionState(shell=shell, running=False)
         self._sessions[session] = state
@@ -619,16 +615,15 @@ class RemoteExecManager:
         if state is None or not state.running:
             return None
 
-        runtime = _load_core_runtime()
-        full_output, _ = await state.shell.read_output(timeout=1, reset_full_output=True)
+        full_output, _ = await state.shell.read_output(timeout=1, reset_full_output=False)
         output = self._normalize_output(full_output)
 
-        if self._detect_prompt(output, runtime.prompt_patterns):
+        if state.shell.command_completed or self._detect_prompt(output, self._exec_config.prompt_patterns):
             state.running = False
             return None
 
         message = _RUNNING_MESSAGE.format(session=session)
-        if self._detect_dialog(output, runtime.dialog_patterns):
+        if self._detect_dialog(output, self._exec_config.dialog_patterns):
             message = _PAUSE_DIALOG_MESSAGE.format(timeout=1)
 
         return {
@@ -644,7 +639,6 @@ class RemoteExecManager:
         timeouts: dict[str, int],
         reset_full_output: bool,
     ) -> dict[str, Any]:
-        runtime = _load_core_runtime()
         state = await self._ensure_session(session)
 
         start_time = time.monotonic()
@@ -667,14 +661,15 @@ class RemoteExecManager:
             if partial:
                 got_output = True
                 last_output_time = now
-                if self._detect_prompt(output, runtime.prompt_patterns):
-                    state.running = False
-                    completed_output = self._trim_prompt(output, runtime.prompt_patterns)
-                    return {
-                        "message": f"Session {session} completed.",
-                        "output": completed_output,
-                        "running": False,
-                    }
+
+            if state.shell.command_completed or self._detect_prompt(output, self._exec_config.prompt_patterns):
+                state.running = False
+                completed_output = self._trim_prompt(output, self._exec_config.prompt_patterns)
+                return {
+                    "message": f"Session {session} completed.",
+                    "output": completed_output,
+                    "running": False,
+                }
 
             if now - start_time > timeouts["max_exec_timeout"]:
                 state.running = True
@@ -704,7 +699,7 @@ class RemoteExecManager:
 
             if (
                 now - last_output_time > timeouts["dialog_timeout"]
-                and self._detect_dialog(output, runtime.dialog_patterns)
+                and self._detect_dialog(output, self._exec_config.dialog_patterns)
             ):
                 state.running = True
                 return {
@@ -716,15 +711,14 @@ class RemoteExecManager:
     def _normalize_output(self, output: str) -> str:
         if not output:
             return ""
-        runtime = _load_core_runtime()
-        cleaned = runtime.clean_string(str(output))
+        cleaned = _clean_terminal_output(output)
         cleaned = _HEX_ESCAPE_RE.sub("", cleaned)
         return cleaned.strip()
 
     def _detect_prompt(
         self,
         output: str,
-        patterns: list[re.Pattern[str]],
+        patterns: tuple[re.Pattern[str], ...],
     ) -> bool:
         if not output:
             return False
@@ -742,7 +736,7 @@ class RemoteExecManager:
     def _detect_dialog(
         self,
         output: str,
-        patterns: list[re.Pattern[str]],
+        patterns: tuple[re.Pattern[str], ...],
     ) -> bool:
         if not output:
             return False
@@ -757,7 +751,7 @@ class RemoteExecManager:
     def _trim_prompt(
         self,
         output: str,
-        patterns: list[re.Pattern[str]],
+        patterns: tuple[re.Pattern[str], ...],
     ) -> str:
         if not output:
             return ""

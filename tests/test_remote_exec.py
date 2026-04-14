@@ -1,194 +1,128 @@
 from __future__ import annotations
 
-import textwrap
+import sys
 from pathlib import Path
 
 import pytest
 
-import agent_zero_cli.remote_exec as remote_exec_mod
 from agent_zero_cli.remote_exec import RemoteExecManager
 
 
 pytestmark = pytest.mark.anyio
 
 
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+class FakeShellSession:
+    def __init__(self, *, cwd: str | None = None) -> None:
+        self.cwd = cwd
+        self.commands: list[str] = []
+        self.inputs: list[str] = []
+        self.is_alive = True
+        self.command_completed = False
+        self._full_output = ""
+        self._partial_output = ""
+
+    async def connect(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.is_alive = False
+
+    async def send_command(self, command: str) -> None:
+        self.commands.append(command)
+        if command == "ansi":
+            self._full_output = "\x1b[31mhello\x1b[0m\r\n"
+            self._partial_output = self._full_output
+            self.command_completed = True
+            return
+
+        if "A0_PY_CODE" in command:
+            self._full_output = "42\r\n"
+            self._partial_output = self._full_output
+            self.command_completed = True
+            return
+
+        if "A0_NODE_CODE" in command:
+            self._full_output = "node ok\r\n"
+            self._partial_output = self._full_output
+            self.command_completed = True
+            return
+
+        if command == "ask":
+            self._full_output = "Continue? "
+            self._partial_output = self._full_output
+            self.command_completed = False
+            return
+
+        self._full_output = f"ran:{command}\r\n"
+        self._partial_output = self._full_output
+        self.command_completed = True
+
+    async def send_input(self, text: str) -> None:
+        self.inputs.append(text)
+        self._full_output = f"input:{text}\r\n"
+        self._partial_output = self._full_output
+        self.command_completed = True
+
+    async def reset_output(self) -> None:
+        self._full_output = ""
+        self._partial_output = ""
+
+    async def read_output(
+        self,
+        *,
+        timeout: float = 0,
+        reset_full_output: bool = False,
+    ) -> tuple[str, str | None]:
+        del timeout, reset_full_output
+        partial = self._partial_output or None
+        self._partial_output = ""
+        return self._full_output, partial
 
 
-def _make_fake_core_tree(root: Path) -> Path:
-    _write(
-        root / "helpers" / "runtime.py",
-        textwrap.dedent(
-            """
-            def get_terminal_executable():
-                return "/bin/fake-shell"
-            """
-        ).strip()
-        + "\n",
-    )
-    _write(
-        root / "plugins" / "_code_execution" / "helpers" / "tty_session.py",
-        textwrap.dedent(
-            """
-            class TTYSession:
-                def __init__(self, cmd, *, cwd=None, env=None, encoding="utf-8", echo=False):
-                    self.cmd = cmd
-                    self.cwd = cwd
-                    self.env = env or {}
-                    self.encoding = encoding
-                    self.echo = echo
-            """
-        ).strip()
-        + "\n",
-    )
-    _write(
-        root / "plugins" / "_code_execution" / "helpers" / "shell_ssh.py",
-        textwrap.dedent(
-            r"""
-            import re
+@pytest.fixture
+def created_shells(monkeypatch: pytest.MonkeyPatch) -> list[FakeShellSession]:
+    shells: list[FakeShellSession] = []
 
+    def _create_shell_session(self: RemoteExecManager) -> FakeShellSession:
+        shell = FakeShellSession(cwd=self.cwd)
+        shells.append(shell)
+        return shell
 
-            def clean_string(input_string):
-                ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-                cleaned = ansi_escape.sub("", input_string)
-                cleaned = cleaned.replace("\x00", "")
-                cleaned = cleaned.replace("\r\n", "\n")
-                cleaned = cleaned.replace("\r", "\n")
-                return cleaned.strip("\n")
-            """
-        ).strip()
-        + "\n",
-    )
-    _write(
-        root / "plugins" / "_code_execution" / "helpers" / "shell_local.py",
-        textwrap.dedent(
-            """
-            from helpers import runtime
-            from plugins._code_execution.helpers import tty_session
-            from plugins._code_execution.helpers.shell_ssh import clean_string
-
-
-            class LocalInteractiveSession:
-                def __init__(self, cwd=None):
-                    self.session = None
-                    self.full_output = ""
-                    self.cwd = cwd
-                    self._pending = []
-
-                async def connect(self):
-                    self.session = tty_session.TTYSession(
-                        runtime.get_terminal_executable(),
-                        cwd=self.cwd,
-                    )
-
-                async def close(self):
-                    return None
-
-                async def send_command(self, command):
-                    self.full_output = ""
-                    cmd = command.strip()
-                    if cmd == "ansi":
-                        self._pending = ["\\x1b[31mhello\\x1b[0m\\r\\nworkdir$ "]
-                    elif cmd.startswith("ipython -c "):
-                        self._pending = ["42\\r\\nworkdir$ "]
-                    elif cmd.startswith("node /exe/node_eval.js "):
-                        self._pending = ["node ok\\r\\nworkdir$ "]
-                    else:
-                        self._pending = [f"ran:{cmd}\\r\\nworkdir$ "]
-
-                async def read_output(self, timeout=0, reset_full_output=False):
-                    del timeout
-                    if reset_full_output:
-                        self.full_output = ""
-                    if self._pending:
-                        partial = self._pending.pop(0)
-                        self.full_output += partial
-                        return clean_string(self.full_output), clean_string(partial)
-                    return clean_string(self.full_output), None
-            """
-        ).strip()
-        + "\n",
-    )
-    _write(
-        root / "plugins" / "_code_execution" / "default_config.yaml",
-        textwrap.dedent(
-            """
-            code_exec_first_output_timeout: 0
-            code_exec_between_output_timeout: 1
-            code_exec_max_exec_timeout: 5
-            code_exec_dialog_timeout: 0
-            output_first_output_timeout: 0
-            output_between_output_timeout: 1
-            output_max_exec_timeout: 5
-            output_dialog_timeout: 0
-            prompt_patterns: |
-              workdir\\$ ?$
-            dialog_patterns: |
-              \\?\\s*$
-            """
-        ).strip()
-        + "\n",
-    )
-    return root
-
-
-@pytest.fixture(autouse=True)
-def _reset_core_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENT_ZERO_CORE_ROOT", raising=False)
-    remote_exec_mod._reset_core_runtime_cache()
-    yield
-    remote_exec_mod._reset_core_runtime_cache()
+    monkeypatch.setattr(RemoteExecManager, "_create_shell_session", _create_shell_session)
+    return shells
 
 
 def _manager(tmp_path: Path, *, enabled: bool = True) -> RemoteExecManager:
     return RemoteExecManager(cwd=str(tmp_path), enabled=enabled, poll_interval=0.01)
 
 
-def test_resolve_core_root_prefers_env_var(
+async def test_remote_exec_uses_connector_local_runtime_without_core_checkout(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    created_shells: list[FakeShellSession],
 ) -> None:
-    env_root = _make_fake_core_tree(tmp_path / "env-root")
-    fallback_root = _make_fake_core_tree(tmp_path / "fallback-root")
-
-    monkeypatch.setenv("AGENT_ZERO_CORE_ROOT", str(env_root))
-    monkeypatch.setattr(remote_exec_mod, "_CORE_ROOT_CANDIDATES", (str(fallback_root),))
-
-    assert remote_exec_mod._resolve_core_root() == env_root.resolve()
-
-
-async def test_missing_core_root_returns_unavailable_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        remote_exec_mod,
-        "_CORE_ROOT_CANDIDATES",
-        (str(tmp_path / "missing-a"), str(tmp_path / "missing-b")),
-    )
     manager = _manager(tmp_path)
 
     result = await manager.handle_exec_op(
         {
-            "op_id": "exec-missing",
+            "op_id": "exec-terminal",
             "runtime": "terminal",
             "session": 0,
-            "code": "echo ready",
+            "code": "ansi",
         }
     )
 
-    assert result["ok"] is False
-    assert "Agent Zero Core could not be found" in result["error"]
+    assert result["ok"] is True
+    assert result["result"]["output"] == "hello"
+    assert result["result"]["running"] is False
+    assert created_shells[0].commands == ["ansi"]
+
+    await manager.close()
 
 
 async def test_terminal_python_and_nodejs_runtimes_are_supported(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    created_shells: list[FakeShellSession],
 ) -> None:
-    fake_root = _make_fake_core_tree(tmp_path / "core-root")
-    monkeypatch.setenv("AGENT_ZERO_CORE_ROOT", str(fake_root))
     manager = _manager(tmp_path)
 
     terminal_result = await manager.handle_exec_op(
@@ -218,12 +152,67 @@ async def test_terminal_python_and_nodejs_runtimes_are_supported(
 
     assert terminal_result["ok"] is True
     assert terminal_result["result"]["output"] == "hello"
-    assert terminal_result["result"]["running"] is False
 
     assert python_result["ok"] is True
     assert python_result["result"]["output"] == "42"
-    assert python_result["result"]["running"] is False
+    assert "A0_PY_CODE" in created_shells[1].commands[0]
+    assert sys.executable in created_shells[1].commands[0]
 
     assert node_result["ok"] is True
     assert node_result["result"]["output"] == "node ok"
-    assert node_result["result"]["running"] is False
+    assert "A0_NODE_CODE" in created_shells[2].commands[0]
+
+    await manager.close()
+
+
+async def test_input_runtime_sends_keystrokes_into_running_session(
+    tmp_path: Path,
+    created_shells: list[FakeShellSession],
+) -> None:
+    manager = _manager(tmp_path)
+    manager.set_exec_config(
+        {
+            "version": 1,
+            "code_exec_timeouts": {
+                "first_output_timeout": 0,
+                "between_output_timeout": 1,
+                "max_exec_timeout": 5,
+                "dialog_timeout": 0,
+            },
+            "output_timeouts": {
+                "first_output_timeout": 0,
+                "between_output_timeout": 1,
+                "max_exec_timeout": 5,
+                "dialog_timeout": 0,
+            },
+            "dialog_patterns": [r"\?\s*$"],
+        }
+    )
+
+    running_result = await manager.handle_exec_op(
+        {
+            "op_id": "exec-ask",
+            "runtime": "terminal",
+            "session": 0,
+            "code": "ask",
+        }
+    )
+    input_result = await manager.handle_exec_op(
+        {
+            "op_id": "exec-input",
+            "runtime": "input",
+            "session": 0,
+            "keyboard": "y",
+        }
+    )
+
+    assert running_result["ok"] is True
+    assert running_result["result"]["running"] is True
+    assert "Potential dialog detected" in running_result["result"]["message"]
+
+    assert input_result["ok"] is True
+    assert input_result["result"]["output"] == "input:y"
+    assert input_result["result"]["running"] is False
+    assert created_shells[0].inputs == ["y"]
+
+    await manager.close()
