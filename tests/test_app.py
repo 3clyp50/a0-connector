@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_zero_cli import connection
 from agent_zero_cli.app import AgentZeroCLI
 from agent_zero_cli.client import DEFAULT_HOST
 from agent_zero_cli.config import CLIConfig
@@ -124,8 +125,13 @@ class FakeConnectionStatus:
         self.status = "disconnected"
         self.url = ""
         self.project_enabled = False
+        self.project_state = None
 
     def set_project_enabled(self, enabled: bool) -> None:
+        self.project_enabled = enabled
+
+    def set_project_state(self, project: object, *, enabled: bool) -> None:
+        self.project_state = project
         self.project_enabled = enabled
 
     def clear_token_usage(self) -> None:
@@ -297,6 +303,120 @@ def test_assistant_message_switches_ready_view_to_chat(
     assert log.intro_visible is True
     assert input_widget.focused is True
     assert dummy_app.rendered_events[-1]["event"] == "assistant_message"
+
+
+def test_remember_context_updates_config_and_persists(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        "agent_zero_cli.app.save_last_context",
+        lambda host, context_id: saved.append((host, context_id)),
+    )
+
+    dummy_app._remember_context("ctx-42")
+
+    assert dummy_app.config.last_context_id == "ctx-42"
+    assert dummy_app.config.last_context_host == "http://example.test"
+    assert saved == [("http://example.test", "ctx-42")]
+
+
+async def test_switch_context_persists_last_context(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.current_context = "ctx-old"
+
+    unsubscribed: list[str] = []
+    subscribed: list[tuple[str, int]] = []
+    remembered: list[str] = []
+
+    async def async_noop(*args, **kwargs) -> None:
+        del args, kwargs
+
+    async def fake_unsubscribe_context(context_id: str) -> None:
+        unsubscribed.append(context_id)
+
+    async def fake_subscribe_context(context_id: str, from_seq: int = 0) -> None:
+        subscribed.append((context_id, from_seq))
+
+    monkeypatch.setattr(dummy_app, "_stop_token_refresh", lambda: None)
+    monkeypatch.setattr(dummy_app, "_hide_project_menu", async_noop)
+    monkeypatch.setattr(dummy_app, "_hide_profile_menu", async_noop)
+    monkeypatch.setattr(dummy_app.client, "unsubscribe_context", fake_unsubscribe_context)
+    monkeypatch.setattr(dummy_app.client, "subscribe_context", fake_subscribe_context)
+    monkeypatch.setattr(dummy_app, "_remember_context", lambda context_id: remembered.append(context_id))
+    monkeypatch.setattr(dummy_app, "_refresh_projects", async_noop)
+    monkeypatch.setattr(dummy_app, "_refresh_model_switcher", async_noop)
+    monkeypatch.setattr(dummy_app, "_refresh_token_usage", async_noop)
+    monkeypatch.setattr(dummy_app, "_start_token_refresh", lambda: None)
+
+    await dummy_app._switch_context("ctx-2", has_messages_hint=True)
+
+    assert unsubscribed == ["ctx-old"]
+    assert subscribed == [("ctx-2", 0)]
+    assert remembered == ["ctx-2"]
+    assert dummy_app.current_context == "ctx-2"
+    assert dummy_app.current_context_has_messages is True
+
+
+async def test_resolve_initial_context_restores_saved_chat_for_same_host(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.config.last_context_id = "ctx-saved"
+    dummy_app.config.last_context_host = "http://example.test"
+    dummy_app.connector_features = {"chat_get"}
+
+    async def fake_list_chats() -> list[dict[str, object]]:
+        return [{"id": "ctx-saved"}]
+
+    async def fake_get_chat(context_id: str) -> dict[str, object]:
+        assert context_id == "ctx-saved"
+        return {"log_entries": [{"sequence": 1}]}
+
+    async def fail_create_chat(*args, **kwargs) -> str:
+        del args, kwargs
+        raise AssertionError("create_chat should not run when the saved context still exists")
+
+    monkeypatch.setattr(dummy_app.client, "list_chats", fake_list_chats)
+    monkeypatch.setattr(dummy_app.client, "get_chat", fake_get_chat)
+    monkeypatch.setattr(dummy_app.client, "create_chat", fail_create_chat)
+
+    context_id, has_messages_hint = await connection._resolve_initial_context(
+        dummy_app,
+        "http://example.test",
+    )
+
+    assert context_id == "ctx-saved"
+    assert has_messages_hint is True
+
+
+async def test_resolve_initial_context_falls_back_to_new_chat_when_saved_chat_is_missing(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.config.last_context_id = "ctx-saved"
+    dummy_app.config.last_context_host = "http://example.test"
+
+    async def fake_list_chats() -> list[dict[str, object]]:
+        return [{"id": "ctx-other"}]
+
+    async def fake_create_chat() -> str:
+        return "ctx-new"
+
+    monkeypatch.setattr(dummy_app.client, "list_chats", fake_list_chats)
+    monkeypatch.setattr(dummy_app.client, "create_chat", fake_create_chat)
+
+    context_id, has_messages_hint = await connection._resolve_initial_context(
+        dummy_app,
+        "http://example.test",
+    )
+
+    assert context_id == "ctx-new"
+    assert has_messages_hint is False
 
 
 async def test_action_pause_agent_resumes_when_pause_is_latched(

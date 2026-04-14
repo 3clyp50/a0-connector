@@ -4,11 +4,15 @@ from pathlib import Path
 
 _ENV_DIR = Path.home() / ".agent-zero"
 _ENV_FILE = _ENV_DIR / ".env"
+_LAST_CONTEXT_ID_KEY = "AGENT_ZERO_LAST_CONTEXT_ID"
+_LAST_CONTEXT_HOST_KEY = "AGENT_ZERO_LAST_CONTEXT_HOST"
 
 
 @dataclass
 class CLIConfig:
     instance_url: str = ""
+    last_context_id: str = ""
+    last_context_host: str = ""
 
 
 def _read_dotenv() -> dict[str, str]:
@@ -70,10 +74,27 @@ def delete_env(key: str) -> None:
     _ENV_FILE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
+def save_last_context(host: str, context_id: str) -> None:
+    """Persist the last active chat context for the current host."""
+    normalized_host = host.strip().rstrip("/")
+    normalized_context_id = context_id.strip()
+    if not normalized_host or not normalized_context_id:
+        return
+
+    save_env(_LAST_CONTEXT_HOST_KEY, normalized_host)
+    save_env(_LAST_CONTEXT_ID_KEY, normalized_context_id)
+
+
 def load_config() -> CLIConfig:
     """Load config from environment variables, falling back to ~/.agent-zero/.env."""
     dotenv = _read_dotenv()
 
     instance_url = os.environ.get("AGENT_ZERO_HOST") or dotenv.get("AGENT_ZERO_HOST", "")
+    last_context_id = os.environ.get(_LAST_CONTEXT_ID_KEY) or dotenv.get(_LAST_CONTEXT_ID_KEY, "")
+    last_context_host = os.environ.get(_LAST_CONTEXT_HOST_KEY) or dotenv.get(_LAST_CONTEXT_HOST_KEY, "")
 
-    return CLIConfig(instance_url=instance_url)
+    return CLIConfig(
+        instance_url=instance_url,
+        last_context_id=last_context_id,
+        last_context_host=last_context_host,
+    )

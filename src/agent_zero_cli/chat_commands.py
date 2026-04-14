@@ -61,6 +61,7 @@ async def switch_context(app: AgentZeroCLI, context_id: str, *, has_messages_hin
     app._clear_project_state()
     app._sync_body_mode()
     await app.client.subscribe_context(context_id, from_seq=0)
+    app._remember_context(context_id)
     await app._refresh_projects(context_id=context_id)
     await app._refresh_model_switcher()
     await app._refresh_token_usage(context_id=context_id)

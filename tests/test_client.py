@@ -17,7 +17,7 @@ from agent_zero_cli.client import (
     A0WebSocketConnectionError,
     _ensure_aiohttp_ws_timeout_compat,
 )
-from agent_zero_cli.config import load_config, save_env
+from agent_zero_cli.config import load_config, save_env, save_last_context
 
 
 pytestmark = pytest.mark.anyio
@@ -150,11 +150,23 @@ def test_load_config_prefers_environment_over_dotenv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AGENT_ZERO_HOST", "http://env-host:1234")
+    monkeypatch.setenv("AGENT_ZERO_LAST_CONTEXT_ID", "ctx-env")
+    monkeypatch.setenv("AGENT_ZERO_LAST_CONTEXT_HOST", "http://env-host:1234")
 
     env_dir = tmp_path / ".agent-zero"
     env_dir.mkdir()
     env_file = env_dir / ".env"
-    env_file.write_text("AGENT_ZERO_HOST=http://dotenv-host:5080\n", encoding="utf-8")
+    env_file.write_text(
+        "\n".join(
+            (
+                "AGENT_ZERO_HOST=http://dotenv-host:5080",
+                "AGENT_ZERO_LAST_CONTEXT_ID=ctx-dotenv",
+                "AGENT_ZERO_LAST_CONTEXT_HOST=http://dotenv-host:5080",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     import agent_zero_cli.config as config_mod
 
@@ -162,6 +174,8 @@ def test_load_config_prefers_environment_over_dotenv(
     config = load_config()
 
     assert config.instance_url == "http://env-host:1234"
+    assert config.last_context_id == "ctx-env"
+    assert config.last_context_host == "http://env-host:1234"
 
 
 def test_save_env_updates_existing_key(
@@ -180,6 +194,27 @@ def test_save_env_updates_existing_key(
     save_env("AGENT_ZERO_HOST", "http://new:9090")
 
     assert env_file.read_text(encoding="utf-8") == "AGENT_ZERO_HOST=http://new:9090\n"
+
+
+def test_save_last_context_updates_host_and_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_dir = tmp_path / ".agent-zero"
+    env_dir.mkdir()
+    env_file = env_dir / ".env"
+    env_file.write_text("AGENT_ZERO_HOST=http://old:5080\n", encoding="utf-8")
+
+    import agent_zero_cli.config as config_mod
+
+    monkeypatch.setattr(config_mod, "_ENV_DIR", env_dir)
+    monkeypatch.setattr(config_mod, "_ENV_FILE", env_file)
+    save_last_context("http://new:9090/", "ctx-9")
+
+    contents = env_file.read_text(encoding="utf-8").splitlines()
+    assert "AGENT_ZERO_HOST=http://old:5080" in contents
+    assert "AGENT_ZERO_LAST_CONTEXT_HOST=http://new:9090" in contents
+    assert "AGENT_ZERO_LAST_CONTEXT_ID=ctx-9" in contents
 
 
 async def test_fetch_capabilities_raises_plugin_missing_on_404() -> None:

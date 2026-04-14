@@ -75,6 +75,35 @@ def validate_capabilities(
         raise ValueError("Connector capabilities still advertise the removed connector_login feature")
 
 
+def _chat_identifier(chat: dict[str, Any]) -> str:
+    return str(chat.get("id") or chat.get("context_id") or chat.get("ctxid") or "").strip()
+
+
+async def _resolve_initial_context(app: AgentZeroCLI, host: str) -> tuple[str, bool]:
+    saved_context_id = app._saved_context_for_host(host)
+    if saved_context_id:
+        try:
+            contexts = await app.client.list_chats()
+        except Exception:
+            contexts = []
+
+        selected = next(
+            (context for context in contexts if _chat_identifier(context) == saved_context_id),
+            None,
+        )
+        if selected is not None:
+            has_messages_hint = bool(selected.get("last_message"))
+            if not has_messages_hint and "chat_get" in app.connector_features:
+                try:
+                    metadata = await app.client.get_chat(saved_context_id)
+                except Exception:
+                    metadata = {}
+                has_messages_hint = bool(metadata.get("last_message") or metadata.get("log_entries"))
+            return saved_context_id, has_messages_hint
+
+    return await app.client.create_chat(), False
+
+
 async def begin_connection(
     app: AgentZeroCLI,
     host: str,
@@ -220,7 +249,7 @@ async def begin_connection(
         return
 
     try:
-        context_id = await app.client.create_chat()
+        context_id, has_messages_hint = await _resolve_initial_context(app, normalized_host)
     except Exception as exc:
         app._sync_connection_status("disconnected", normalized_host)
         app._set_splash_stage(
@@ -232,7 +261,7 @@ async def begin_connection(
         return
 
     app.current_context = context_id
-    app.current_context_has_messages = False
+    app.current_context_has_messages = has_messages_hint
     app._response_delivered = False
     app._context_run_complete = False
     app._chat_intro_pending = True
@@ -251,6 +280,7 @@ async def begin_connection(
         )
         return
 
+    app._remember_context(context_id, host=normalized_host)
     app.connected = True
     app._sync_connection_status("connected", normalized_host)
     input_widget = app.query_one("#message-input", ChatInput)

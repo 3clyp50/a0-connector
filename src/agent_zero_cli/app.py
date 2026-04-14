@@ -26,7 +26,7 @@ from agent_zero_cli import (
 )
 from agent_zero_cli.client import A0Client, DEFAULT_HOST
 from agent_zero_cli.commands import CommandAvailability, CommandSpec
-from agent_zero_cli.config import CLIConfig, load_config
+from agent_zero_cli.config import CLIConfig, load_config, save_last_context
 from agent_zero_cli.instance_discovery import DiscoveryResult, discover_local_instances
 from agent_zero_cli.remote_exec import PythonTTYManager
 from agent_zero_cli.remote_files import RemoteFileUtility
@@ -590,6 +590,28 @@ class AgentZeroCLI(App):
 
     def _normalize_host(self, host: str) -> str:
         return splash_helpers.normalize_host(host)
+
+    def _saved_context_for_host(self, host: str) -> str:
+        normalized_host = host.strip()
+        if not normalized_host:
+            return ""
+
+        saved_host = self.config.last_context_host.strip().rstrip("/")
+        if self._normalize_host(normalized_host).rstrip("/") != saved_host:
+            return ""
+
+        return self.config.last_context_id.strip()
+
+    def _remember_context(self, context_id: str, *, host: str | None = None) -> None:
+        normalized_context_id = context_id.strip()
+        host_value = (host or self.client.base_url or self.config.instance_url).strip()
+        if not normalized_context_id or not host_value:
+            return
+
+        normalized_host = self._normalize_host(host_value).rstrip("/")
+        self.config.last_context_id = normalized_context_id
+        self.config.last_context_host = normalized_host
+        save_last_context(normalized_host, normalized_context_id)
 
     def _set_splash_state(self, **changes: Any) -> None:
         splash_helpers.set_splash_state(self, **changes)
