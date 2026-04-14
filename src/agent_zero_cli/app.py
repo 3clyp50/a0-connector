@@ -25,6 +25,10 @@ from agent_zero_cli import (
     splash_helpers,
 )
 from agent_zero_cli.client import A0Client, DEFAULT_HOST
+from agent_zero_cli.clipboard import (
+    copy_text_to_windows_clipboard,
+    should_use_native_windows_clipboard,
+)
 from agent_zero_cli.commands import CommandAvailability, CommandSpec
 from agent_zero_cli.config import CLIConfig, load_config, save_last_context
 from agent_zero_cli.instance_discovery import DiscoveryResult, discover_local_instances
@@ -179,6 +183,12 @@ class AgentZeroCLI(App):
         yield ModelSwitcherBar(id="model-switcher-bar")
         yield ChatInput(id="message-input")
         yield DynamicFooter()
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy text via Textual and mirror it to the Windows clipboard when needed."""
+        super().copy_to_clipboard(text)
+        if should_use_native_windows_clipboard():
+            copy_text_to_windows_clipboard(text)
 
     async def on_mount(self) -> None:
         input_widget = self.query_one("#message-input", ChatInput)

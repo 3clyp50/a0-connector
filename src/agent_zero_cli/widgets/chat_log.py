@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.console import Group, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.padding import Padding
+from rich.segment import Segment
 from rich.text import Text
 from textual import events
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.content import Content
+from textual.style import Style
 from textual.widgets import Static
 
 from agent_zero_cli.widgets.shimmer import build_dim_status, build_shimmer_text
@@ -218,7 +221,102 @@ def _build_status_body(
     return Padding(Group(*renderables), _STATUS_BODY_PADDING)
 
 
-class StatusEntry(Static):
+def _segments_to_content(
+    segments: list[Segment],
+    *,
+    ansi_theme: object | None = None,
+) -> Content:
+    parts: list[Content | str | tuple[str, Style]] = []
+    for text, rich_style, control in segments:
+        if control or not text:
+            continue
+        style = Style.from_rich_style(rich_style, ansi_theme) if rich_style else ""
+        parts.append((text, style) if style else text)
+    if not parts:
+        return Content()
+    return Content.assemble(*parts, strip_control_codes=False).simplify()
+
+
+def _renderable_to_content(widget: Static, renderable: RenderableType) -> Content:
+    if isinstance(renderable, Content):
+        return renderable
+    if isinstance(renderable, Text):
+        return Content.from_rich_text(renderable)
+    if isinstance(renderable, str):
+        return Content.from_text(renderable)
+
+    ansi_theme = None
+    width = 1
+    try:
+        app = widget.app
+        ansi_theme = app.ansi_theme
+        width = max(widget.content_region.width, widget.size.width, app.size.width, 1)
+    except Exception:
+        width = max(widget.size.width, 1)
+
+    console = Console(
+        width=width,
+        record=True,
+        force_terminal=True,
+        legacy_windows=False,
+        color_system="truecolor",
+    )
+    lines = [
+        _segments_to_content(line, ansi_theme=ansi_theme).rstrip_end(width)
+        for line in console.render_lines(
+            renderable,
+            console.options.update(width=width, height=None, highlight=False),
+            pad=False,
+            new_lines=False,
+        )
+    ]
+    if not lines:
+        return Content()
+    return Content("\n").join(lines).simplify()
+
+
+class SelectableStatic(Static):
+    """Static widget that keeps the current rich transcript renderable selectable."""
+
+    can_focus = True
+
+    def __init__(
+        self,
+        content: RenderableType = "",
+        *,
+        expand: bool = False,
+        shrink: bool = False,
+        markup: bool = True,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            "",
+            expand=expand,
+            shrink=shrink,
+            markup=markup,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
+        self._renderable = content
+
+    def render(self) -> Content:
+        return _renderable_to_content(self, self._renderable)
+
+    def update(self, content: RenderableType = "", *, layout: bool = True) -> None:
+        self._renderable = content
+        self.refresh(layout=layout)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        del event
+        self.focus()
+
+
+class StatusEntry(SelectableStatic):
     """Interactive status row with a shimmer header and expandable KVP body."""
 
     can_focus = True
@@ -270,6 +368,8 @@ class StatusEntry(Static):
         self.scroll_visible(animate=False)
 
     def on_click(self, event: events.Click) -> None:
+        if self.text_selection is not None:
+            return
         if not self.has_details:
             return
         self.action_toggle()
@@ -295,7 +395,7 @@ class StatusEntry(Static):
         self.update(Padding(Group(*renderables), _STATUS_HISTORY_PADDING), layout=layout)
 
 
-class CodeEntry(Static):
+class CodeEntry(SelectableStatic):
     """Interactive code row with a status header and expandable rich body."""
 
     can_focus = True
@@ -350,6 +450,8 @@ class CodeEntry(Static):
         self.scroll_visible(animate=False)
 
     def on_click(self, event: events.Click) -> None:
+        if self.text_selection is not None:
+            return
         if not self.has_details:
             return
         self.action_toggle()
@@ -399,7 +501,7 @@ class ChatLog(VerticalScroll):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._seq_to_widget: dict[int, Static] = {}
+        self._seq_to_widget: dict[int, SelectableStatic] = {}
         self._sys_seq: int = -100
         self._intro_widget: Static | None = None
         self._workspace_widget: Static | None = None
@@ -542,14 +644,17 @@ class ChatLog(VerticalScroll):
             scroll: Whether to automatically scroll to the element.
         """
         should_scroll = self._should_auto_scroll(scroll)
+        widget = self._seq_to_widget.get(sequence)
+        if widget is not None and widget.__class__ is not SelectableStatic:
+            widget.remove()
+            widget = None
 
-        if sequence in self._seq_to_widget:
-            widget = self._seq_to_widget[sequence]
+        if isinstance(widget, SelectableStatic) and widget.__class__ is SelectableStatic:
             widget.update(renderable)
             if should_scroll:
                 self._schedule_scroll_end()
         else:
-            widget = Static(renderable)
+            widget = SelectableStatic(renderable)
             self._seq_to_widget[sequence] = widget
             self.mount(widget)
             if should_scroll:

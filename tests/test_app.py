@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
+from rich.panel import Panel
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.selection import SELECT_ALL
 
 from agent_zero_cli import connection
 from agent_zero_cli.app import AgentZeroCLI
 from agent_zero_cli.client import DEFAULT_HOST
 from agent_zero_cli.config import CLIConfig
 from agent_zero_cli.instance_discovery import DiscoveredInstance, DiscoveryResult
+from agent_zero_cli.widgets.chat_log import ChatLog, SelectableStatic
 from agent_zero_cli.widgets import ChatInput, SplashState
 
 
@@ -142,6 +145,28 @@ class DummyAgentZeroCLI(AgentZeroCLI):
     def __init__(self) -> None:
         super().__init__(config=CLIConfig(instance_url="http://example.test"))
         self.rendered_events: list[dict[str, object]] = []
+
+
+class TranscriptSelectionApp(App[None]):
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Exit", show=False),
+    ]
+    CSS = """
+    #chat-log {
+        width: 80;
+        height: 20;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.quit_attempts = 0
+
+    def compose(self) -> ComposeResult:
+        yield ChatLog(id="chat-log")
+
+    def action_quit(self) -> None:
+        self.quit_attempts += 1
 
 
 @pytest.fixture
@@ -557,3 +582,117 @@ async def test_remote_safety_toggles_update_local_permissions(
     assert dummy_app._remote_exec_enabled is True
     assert dummy_app._remote_files.allow_writes is True
     assert dummy_app._python_tty.enabled is True
+
+
+def test_copy_to_clipboard_mirrors_to_native_windows_clipboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentZeroCLI(config=CLIConfig(instance_url="http://example.test"))
+    copied: list[str] = []
+    mirrored: list[str] = []
+
+    monkeypatch.setattr(
+        "textual.app.App.copy_to_clipboard",
+        lambda self, text: copied.append(text),
+    )
+    monkeypatch.setattr(
+        "agent_zero_cli.app.should_use_native_windows_clipboard",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agent_zero_cli.app.copy_text_to_windows_clipboard",
+        lambda text: mirrored.append(text) or True,
+    )
+
+    app.copy_to_clipboard("hello from transcript copy")
+
+    assert copied == ["hello from transcript copy"]
+    assert mirrored == ["hello from transcript copy"]
+
+
+def test_copy_to_clipboard_skips_native_mirror_outside_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentZeroCLI(config=CLIConfig(instance_url="http://example.test"))
+    copied: list[str] = []
+    mirrored: list[str] = []
+
+    monkeypatch.setattr(
+        "textual.app.App.copy_to_clipboard",
+        lambda self, text: copied.append(text),
+    )
+    monkeypatch.setattr(
+        "agent_zero_cli.app.should_use_native_windows_clipboard",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "agent_zero_cli.app.copy_text_to_windows_clipboard",
+        lambda text: mirrored.append(text) or True,
+    )
+
+    app.copy_to_clipboard("non-windows path")
+
+    assert copied == ["non-windows path"]
+    assert mirrored == []
+
+
+async def test_chat_log_regular_entries_copy_selected_text() -> None:
+    app = TranscriptSelectionApp()
+
+    async with app.run_test() as pilot:
+        log = app.query_one("#chat-log", ChatLog)
+        log.append_or_update(
+            1,
+            Panel("Copy me from the live transcript", border_style="#555555", padding=(0, 1)),
+        )
+        await pilot.pause()
+
+        widget = log._seq_to_widget[1]
+        assert isinstance(widget, SelectableStatic)
+
+        app.screen.selections = {widget: SELECT_ALL}
+        app.screen.action_copy_text()
+
+        assert "Copy me from the live transcript" in app.clipboard
+
+
+async def test_chat_log_status_entries_copy_selected_text() -> None:
+    app = TranscriptSelectionApp()
+
+    async with app.run_test() as pilot:
+        log = app.query_one("#chat-log", ChatLog)
+        log.append_or_update_status(
+            2,
+            "Thinking",
+            "Planning next step",
+            {"thoughts": ["Check transcript selection behavior"]},
+            active=False,
+        )
+        await pilot.pause()
+
+        widget = log._seq_to_widget[2]
+        widget.action_toggle()
+        await pilot.pause()
+        app.screen.selections = {widget: SELECT_ALL}
+        app.screen.action_copy_text()
+
+        assert "Thinking" in app.clipboard
+        assert "Planning next step" in app.clipboard
+        assert "Check transcript selection behavior" in app.clipboard
+
+
+async def test_chat_log_selection_ctrl_c_copies_without_triggering_quit() -> None:
+    app = TranscriptSelectionApp()
+
+    async with app.run_test() as pilot:
+        log = app.query_one("#chat-log", ChatLog)
+        log.append_or_update(3, Panel("Ctrl+C should copy this selection", border_style="#555555", padding=(0, 1)))
+        await pilot.pause()
+
+        widget = log._seq_to_widget[3]
+        widget.focus()
+        app.screen.selections = {widget: SELECT_ALL}
+        await pilot.press("ctrl+c")
+
+        assert app.quit_attempts == 0
+        assert "Ctrl+C should copy this selection" in app.clipboard
