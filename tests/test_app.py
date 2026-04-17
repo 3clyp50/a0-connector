@@ -471,7 +471,7 @@ async def test_action_pause_agent_resumes_when_pause_is_latched(
     assert input_widget.activity_label == "Resuming"
 
 
-async def test_active_run_preserves_draft_and_blocks_new_send(
+async def test_active_run_submission_is_sent_as_intervention(
     dummy_app: DummyAgentZeroCLI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -480,10 +480,38 @@ async def test_active_run_preserves_draft_and_blocks_new_send(
     dummy_app.current_context_has_messages = True
     dummy_app.agent_active = True
 
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_send_message(text: str, context_id: str | None) -> None:
+        calls.append((text, context_id))
+
+    monkeypatch.setattr(dummy_app.client, "send_message", fake_send_message)
+
+    input_widget = dummy_app._test_widgets["#message-input"]  # type: ignore[index]
+    await dummy_app.on_chat_input_submitted(
+        ChatInput.Submitted(value="draft follow-up", input=input_widget)
+    )
+
+    assert calls == [("draft follow-up", "ctx-1")]
+    assert input_widget.value == ""
+    assert dummy_app.agent_active is True
+    assert dummy_app._response_delivered is False
+    assert dummy_app._context_run_complete is False
+
+
+async def test_send_failure_restores_draft_and_previous_state(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.connected = True
+    dummy_app.current_context = "ctx-1"
+    dummy_app.current_context_has_messages = False
+
     notices: list[tuple[str, bool]] = []
 
     async def fake_send_message(text: str, context_id: str | None) -> None:
-        raise AssertionError(f"send_message should not run for {text=} {context_id=}")
+        del text, context_id
+        raise RuntimeError("socket offline")
 
     monkeypatch.setattr(dummy_app.client, "send_message", fake_send_message)
     monkeypatch.setattr(
@@ -493,18 +521,18 @@ async def test_active_run_preserves_draft_and_blocks_new_send(
     )
 
     input_widget = dummy_app._test_widgets["#message-input"]  # type: ignore[index]
+    body = dummy_app._test_widgets["#body-switcher"]  # type: ignore[index]
+
     await dummy_app.on_chat_input_submitted(
-        ChatInput.Submitted(value="draft follow-up", input=input_widget)
+        ChatInput.Submitted(value="first hello", input=input_widget)
     )
 
-    assert input_widget.value == "draft follow-up"
+    assert input_widget.value == "first hello"
     assert input_widget.focused is True
-    assert notices == [
-        (
-            "The agent is still running. Keep drafting here, then send after it finishes or pause it with F8.",
-            True,
-        )
-    ]
+    assert dummy_app.current_context_has_messages is False
+    assert dummy_app.agent_active is False
+    assert body.current == "splash-view"
+    assert notices == [("Error sending message: socket offline", True)]
 
 
 async def test_profile_command_dispatches_profile_menu(

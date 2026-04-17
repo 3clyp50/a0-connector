@@ -976,18 +976,15 @@ class AgentZeroCLI(App):
             )
             return
 
-        if self.agent_active:
-            event.input.value = raw_text
-            self._focus_message_input()
-            self._show_notice(
-                "The agent is still running. Keep drafting here, then send after it finishes or pause it with F8.",
-                error=True,
-            )
-            return
-
         if not self.current_context:
             self._show_notice("No active chat context.", error=True)
             return
+
+        previous_agent_active = self.agent_active
+        previous_pause_latched = self._pause_latched
+        previous_context_has_messages = self.current_context_has_messages
+        previous_response_delivered = self._response_delivered
+        previous_context_run_complete = self._context_run_complete
 
         self._set_pause_latched(False)
         self._mark_context_has_messages()
@@ -999,8 +996,15 @@ class AgentZeroCLI(App):
         try:
             await self.client.send_message(text, self.current_context)
         except Exception as exc:
+            self.current_context_has_messages = previous_context_has_messages
+            self._response_delivered = previous_response_delivered
+            self._context_run_complete = previous_context_run_complete
+            self.agent_active = previous_agent_active
+            self._set_pause_latched(previous_pause_latched)
+            self._sync_body_mode()
+            event.input.value = raw_text
+            self._focus_message_input()
             self._show_notice(f"Error sending message: {exc}", error=True)
-            self.agent_active = False
             self._sync_ready_actions()
 
     def on_chat_input_value_changed(self, event: ChatInput.ValueChanged) -> None:
