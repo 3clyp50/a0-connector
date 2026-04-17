@@ -32,6 +32,8 @@ _EVENT_FILE_OP = "connector_file_op"
 _EVENT_FILE_OP_RESULT = "connector_file_op_result"
 _EVENT_EXEC_OP = "connector_exec_op"
 _EVENT_EXEC_OP_RESULT = "connector_exec_op_result"
+_EVENT_COMPUTER_USE_OP = "connector_computer_use_op"
+_EVENT_COMPUTER_USE_OP_RESULT = "connector_computer_use_op_result"
 _EVENT_REMOTE_TREE_UPDATE = "connector_remote_tree_update"
 _EVENT_ERROR = "connector_error"
 
@@ -88,6 +90,7 @@ class A0Client:
         self.on_error: Callable[[dict[str, Any]], None] | None = None
         self.on_file_op: Callable[[dict[str, Any]], Any] | None = None
         self.on_exec_op: Callable[[dict[str, Any]], Any] | None = None
+        self.on_computer_use_op: Callable[[dict[str, Any]], Any] | None = None
 
     def _api_url(self, endpoint: str) -> str:
         return f"{self.base_url}{_PLUGIN_API}/{endpoint}"
@@ -360,6 +363,16 @@ class A0Client:
                 namespace=WS_NAMESPACE,
             )
 
+        @self.sio.on(_EVENT_COMPUTER_USE_OP, namespace=WS_NAMESPACE)
+        async def _on_computer_use_op(payload: dict[str, Any]) -> None:
+            request = self._unwrap_envelope(payload)
+            result = await self._handle_computer_use_op(request)
+            await self.sio.emit(
+                _EVENT_COMPUTER_USE_OP_RESULT,
+                result,
+                namespace=WS_NAMESPACE,
+            )
+
         self._events_registered = True
 
     async def _handle_file_op(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -422,6 +435,39 @@ class A0Client:
             "error": "Invalid exec_op handler result",
         }
 
+    async def _handle_computer_use_op(self, data: dict[str, Any]) -> dict[str, Any]:
+        callback = self.on_computer_use_op
+        op_id = data.get("op_id")
+        if callback is None:
+            return {
+                "op_id": op_id,
+                "ok": False,
+                "error": "No computer_use_op handler configured",
+                "code": "COMPUTER_USE_ERROR",
+            }
+
+        try:
+            result = callback(data)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            return {
+                "op_id": op_id,
+                "ok": False,
+                "error": str(exc),
+                "code": "COMPUTER_USE_ERROR",
+            }
+
+        if isinstance(result, dict):
+            return result
+
+        return {
+            "op_id": op_id,
+            "ok": False,
+            "error": "Invalid computer_use_op handler result",
+            "code": "COMPUTER_USE_ERROR",
+        }
+
     async def fetch_capabilities(self) -> dict[str, Any]:
         response = await self._post("capabilities")
         if response.status_code == 404:
@@ -468,15 +514,15 @@ class A0Client:
         except Exception as exc:
             raise A0WebSocketConnectionError(self._format_namespace_rejection_error(exc)) from exc
 
-    async def send_hello(self) -> dict[str, Any]:
-        return await self._call(
-            _EVENT_HELLO,
-            {
-                "protocol": PROTOCOL_VERSION,
-                "client": "a0",
-                "client_version": __version__,
-            },
-        )
+    async def send_hello(self, *, computer_use: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "protocol": PROTOCOL_VERSION,
+            "client": "a0",
+            "client_version": __version__,
+        }
+        if isinstance(computer_use, dict):
+            payload["computer_use"] = dict(computer_use)
+        return await self._call(_EVENT_HELLO, payload)
 
     async def subscribe_context(self, context_id: str, from_seq: int = 0) -> dict[str, Any]:
         return await self._call(

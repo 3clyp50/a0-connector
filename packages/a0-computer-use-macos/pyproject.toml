@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "a0-computer-use-macos"
+version = "1.5"
+description = "Reserved macOS computer-use backend package for a0"
+requires-python = ">=3.10"
+authors = [
+    { name = "agent0ai" },
+]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/a0_computer_use_macos"]

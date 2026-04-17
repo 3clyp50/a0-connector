@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "a0"
-version = "0.1.0"
+version = "1.5"
 description = "Terminal chat interface for Agent Zero"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -29,6 +29,8 @@ dependencies = [
     "python-socketio[asyncio_client]>=5.0.0",
     "httpx>=0.27.0",
     "aiohttp>=3.11.0",
+    'a0-computer-use-wayland>=1.5; platform_system == "Linux"',
+    'a0-computer-use-windows>=1.5; platform_system == "Windows"',
 ]
 
 [project.urls]

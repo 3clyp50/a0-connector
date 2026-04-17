@@ -5,6 +5,7 @@
 ```
 a0-connector/
 ├── src/agent_zero_cli/     # CLI (Textual, httpx, python-socketio)
+├── packages/               # Published backend package scaffolding and metadata
 ├── plugin/_a0_connector/    # Builtin plugin source mirrored into Agent Zero Core plugins/_a0_connector
 ├── tests/                  # pytest
 └── docs/                   # You are here
@@ -40,6 +41,8 @@ a0
 ```
 
 When you are developing against a Docker-detected local Agent Zero instance, prefer `localhost` over `127.0.0.1` so the saved host matches the discovered host exactly.
+
+The published `a0` wheel uses environment markers to pull the matching computer-use backend automatically. Linux installs `a0-computer-use-wayland`, Windows installs `a0-computer-use-windows`, and the reserved names `a0-computer-use-x11` and `a0-computer-use-macos` are held for later releases.
 
 ### Mirroring backend changes back into this repo
 

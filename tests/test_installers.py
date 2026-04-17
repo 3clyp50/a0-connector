@@ -19,7 +19,7 @@ def test_unix_installer_lets_uv_manage_python() -> None:
     assert "python_ok" not in installer
     assert "--no-python-downloads" not in installer
     assert '--python "$PYTHON_CMD"' not in installer
-    assert 'a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip' in installer
+    assert 'PACKAGE_SPEC="${A0_PACKAGE_SPEC:-a0}"' in installer
     assert 'uv tool install --upgrade "$PACKAGE_SPEC"' in installer
 
 
@@ -39,9 +39,30 @@ def test_windows_installer_lets_uv_manage_python() -> None:
     assert "Test-PythonCommand" not in installer
     assert "--no-python-downloads" not in installer
     assert '"--python"' not in installer
-    assert 'a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip' in installer
+    assert '"a0"' in installer
     assert '$installArgs = @("tool", "install", "--upgrade", $PackageSpec)' in installer
     assert 'if ($LASTEXITCODE -ne 0)' in installer
+
+
+def test_root_package_declares_platform_backend_dependencies() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'a0-computer-use-wayland>=1.5; platform_system == "Linux"' in pyproject
+    assert 'a0-computer-use-windows>=1.5; platform_system == "Windows"' in pyproject
+
+
+def test_backend_package_scaffolding_reserves_release_names() -> None:
+    package_names = {
+        "a0-computer-use-wayland": "a0_computer_use_wayland",
+        "a0-computer-use-windows": "a0_computer_use_windows",
+        "a0-computer-use-x11": "a0_computer_use_x11",
+        "a0-computer-use-macos": "a0_computer_use_macos",
+    }
+
+    for dist_name, module_name in package_names.items():
+        pyproject = (ROOT / "packages" / dist_name / "pyproject.toml").read_text(encoding="utf-8")
+        assert f'name = "{dist_name}"' in pyproject
+        assert f'packages = ["src/{module_name}"]' in pyproject
+        assert (ROOT / "packages" / dist_name / "src" / module_name / "__init__.py").exists()
 
 
 def test_readme_documents_uv_managed_python_and_git_install() -> None:
@@ -49,8 +70,9 @@ def test_readme_documents_uv_managed_python_and_git_install() -> None:
     compact = " ".join(readme.split())
     assert "raw.githubusercontent.com/agent0ai/a0-connector/main/install.sh" in compact
     assert "raw.githubusercontent.com/agent0ai/a0-connector/main/install.ps1" in compact
-    assert "directly from a GitHub source archive" in compact
-    assert 'uv tool install --upgrade "a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip"' in compact
+    assert "install the stable `a0` release directly" in compact
+    assert "a0-computer-use-wayland" in compact
+    assert "a0-computer-use-windows" in compact
     assert "will pick a compatible Python" in compact
     assert "download one if needed" in compact
     assert "without requiring `git` to be installed" in readme

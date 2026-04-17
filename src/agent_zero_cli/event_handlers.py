@@ -155,6 +155,10 @@ async def handle_exec_op(app: AgentZeroCLI, data: dict[str, Any]) -> dict[str, A
     return await app._python_tty.handle_exec_op(data)
 
 
+async def handle_computer_use_op(app: AgentZeroCLI, data: dict[str, Any]) -> dict[str, Any]:
+    return await app._computer_use.handle_op(data)
+
+
 def start_remote_tree_publisher(app: AgentZeroCLI) -> None:
     app._stop_remote_tree_publisher()
     app._remote_tree_task = asyncio.create_task(app._remote_tree_publish_loop())

@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$PackageSpec = if ($env:A0_PACKAGE_SPEC) { $env:A0_PACKAGE_SPEC } else { "a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip" }
+$PackageSpec = if ($env:A0_PACKAGE_SPEC) { $env:A0_PACKAGE_SPEC } else { "a0" }
 $UvInstallUrl = if ($env:UV_INSTALL_URL) { $env:UV_INSTALL_URL } else { "https://astral.sh/uv/install.ps1" }
 
 function Ensure-Uv {

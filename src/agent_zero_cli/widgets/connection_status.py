@@ -49,6 +49,8 @@ class ConnectionStatus(Horizontal):
     token_limit = reactive(None)
     current_project = reactive(None)
     project_enabled = reactive(False)
+    computer_use_status = reactive("")
+    computer_use_detail = reactive("")
 
     def compose(self) -> ComposeResult:
         yield Static("", id="connection-status-spacer")
@@ -83,6 +85,14 @@ class ConnectionStatus(Horizontal):
         del enabled
         self._sync_segments()
 
+    def watch_computer_use_status(self, value: str) -> None:
+        del value
+        self._sync_segments()
+
+    def watch_computer_use_detail(self, value: str) -> None:
+        del value
+        self._sync_segments()
+
     def on_project_trigger_requested(self, event: ProjectTrigger.Requested) -> None:
         if event.trigger.id == "connection-status-project" and event.trigger.enabled:
             self.post_message(self.ProjectRequested(self))
@@ -110,6 +120,10 @@ class ConnectionStatus(Horizontal):
     def clear_project_state(self) -> None:
         self.current_project = None
         self.project_enabled = False
+
+    def set_computer_use_state(self, status: str, detail: str = "") -> None:
+        self.computer_use_status = str(status or "").strip()
+        self.computer_use_detail = str(detail or "").strip()
 
     def _render_token_budget(self) -> Text:
         count = self.token_count
@@ -171,11 +185,17 @@ class ConnectionStatus(Horizontal):
             "connecting": "yellow",
         }.get(self.status, "red")
 
-        return Text.assemble(
+        endpoint = Text.assemble(
             (label, "dim"),
             (" ", "dim"),
             ("•", dot_color),
         )
+        computer_use = self.computer_use_status.strip()
+        if computer_use:
+            endpoint.append("  ")
+            endpoint.append("CU ", style="dim")
+            endpoint.append(computer_use, style="#d9e2ec")
+        return endpoint
 
     def _sync_segments(self) -> None:
         try:

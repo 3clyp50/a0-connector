@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import os
 import sys
@@ -11,11 +12,30 @@ import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_ROOT = PROJECT_ROOT / "plugin"
-if not (PLUGIN_ROOT / "_a0_connector").exists():
+_PNG_1X1_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/5wAAAABJRU5ErkJggg=="
+)
+
+
+def _resolve_plugin_root() -> Path:
+    env_root = os.environ.get("A0_CONNECTOR_PLUGIN_ROOT", "").strip()
+    if env_root:
+        candidate = Path(env_root)
+        if (candidate / "_a0_connector").exists():
+            return candidate
+
+    local_root = PROJECT_ROOT / "plugin"
+    if (local_root / "_a0_connector").exists():
+        return local_root
+
     sibling_root = PROJECT_ROOT.parent / "agent-zero" / "plugins"
     if (sibling_root / "_a0_connector").exists():
-        PLUGIN_ROOT = sibling_root
+        return sibling_root
+
+    return local_root
+
+
+PLUGIN_ROOT = _resolve_plugin_root()
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -24,13 +44,8 @@ from agent_zero_cli.remote_files import RemoteFileUtility
 
 
 def _purge_modules() -> None:
-    prefixes = (
-        "agent",
-        "helpers",
-        "plugins",
-    )
     for name in list(sys.modules):
-        if name.startswith(prefixes):
+        if name == "agent" or name.startswith(("agent.", "helpers", "plugins")):
             sys.modules.pop(name, None)
 
 
@@ -65,6 +80,7 @@ def _install_fake_helpers(
     login_mod = types.ModuleType("helpers.login")
     plugins_mod = types.ModuleType("helpers.plugins")
     print_style_mod = types.ModuleType("helpers.print_style")
+    history_mod = types.ModuleType("helpers.history")
     tool_mod = types.ModuleType("helpers.tool")
     ws_mod = types.ModuleType("helpers.ws")
     ws_manager_mod = types.ModuleType("helpers.ws_manager")
@@ -141,9 +157,13 @@ def _install_fake_helpers(
             del namespace, sid, event, payload, handler_id
             return None
 
+    def raw_message(*, raw_content, preview=None):
+        return {"raw_content": raw_content, "preview": preview}
+
     api_mod.ApiHandler = ApiHandler
     api_mod.Request = Request
     api_mod.Response = Response
+    history_mod.RawMessage = raw_message
     login_mod.is_login_required = lambda: auth_required
     plugins_mod.get_plugin_config = lambda plugin_name, **kwargs: (
         code_execution_config if plugin_name == "_code_execution" else {}
@@ -160,6 +180,7 @@ def _install_fake_helpers(
     )
 
     sys.modules["helpers.api"] = api_mod
+    sys.modules["helpers.history"] = history_mod
     sys.modules["helpers.login"] = login_mod
     sys.modules["helpers.plugins"] = plugins_mod
     sys.modules["helpers.print_style"] = print_style_mod
@@ -168,6 +189,7 @@ def _install_fake_helpers(
     sys.modules["helpers.ws_manager"] = ws_manager_mod
 
     helpers_pkg.api = api_mod
+    helpers_pkg.history = history_mod
     helpers_pkg.login = login_mod
     helpers_pkg.plugins = plugins_mod
     helpers_pkg.print_style = print_style_mod
@@ -202,7 +224,9 @@ def _reset_ws_runtime_state(ws_runtime_mod) -> None:
         ws_runtime_mod._sid_contexts.clear()
         ws_runtime_mod._pending_file_ops.clear()
         ws_runtime_mod._pending_exec_ops.clear()
+        ws_runtime_mod._pending_computer_use_ops.clear()
         ws_runtime_mod._remote_tree_snapshots.clear()
+        ws_runtime_mod._sid_computer_use_metadata.clear()
 
 
 class _FakeCliWsManager:
@@ -242,14 +266,55 @@ class _FakeCliWsManager:
         ]
 
 
+class _FakeComputerUseWsManager:
+    def __init__(self, *, computer_use_handler) -> None:
+        self.computer_use_handler = computer_use_handler
+        self.ws_runtime_mod = None
+        self.calls: list[dict[str, object]] = []
+
+    async def emit_to(
+        self,
+        namespace: str,
+        sid: str,
+        event: str,
+        payload: dict,
+        handler_id: str | None = None,
+    ) -> None:
+        del namespace, event, handler_id
+        self.calls.append({"sid": sid, "payload": dict(payload)})
+
+        result = self.computer_use_handler(dict(payload))
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        assert self.ws_runtime_mod is not None
+        self.ws_runtime_mod.resolve_pending_computer_use_op(
+            payload["op_id"],
+            sid=sid,
+            payload=result,
+        )
+
+
 class _FakeRemoteAgent:
     def __init__(self, *, context_id: str = "ctx-1") -> None:
         self.context = types.SimpleNamespace(id=context_id)
         self.data: dict[str, object] = {}
+        self.history_messages: list[dict[str, object]] = []
+        self.tool_results: list[dict[str, object]] = []
 
     def read_prompt(self, file: str, **kwargs) -> str:
         path = kwargs.get("path", "")
         return f"{file}::{path}"
+
+    def hist_add_message(self, ai: bool, content: object, tokens: int = 0, id: str = "") -> dict[str, object]:
+        payload = {"ai": ai, "content": content, "tokens": tokens, "id": id}
+        self.history_messages.append(payload)
+        return payload
+
+    def hist_add_tool_result(self, tool_name: str, tool_result: str, **kwargs) -> dict[str, object]:
+        payload = {"tool_name": tool_name, "tool_result": tool_result, **kwargs}
+        self.tool_results.append(payload)
+        return payload
 
 
 def _load_text_editor_remote_tool(*, file_op_handler):
@@ -262,12 +327,30 @@ def _load_text_editor_remote_tool(*, file_op_handler):
     return shared_ws_manager, ws_runtime_mod, tool_mod
 
 
+def _load_computer_use_remote_tool(*, computer_use_handler):
+    shared_ws_manager = _FakeComputerUseWsManager(computer_use_handler=computer_use_handler)
+    _install_fake_helpers(shared_ws_manager=shared_ws_manager)
+    ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")
+    _reset_ws_runtime_state(ws_runtime_mod)
+    shared_ws_manager.ws_runtime_mod = ws_runtime_mod
+    tool_mod = _reload("plugins._a0_connector.tools.computer_use_remote")
+    return shared_ws_manager, ws_runtime_mod, tool_mod
+
+
 def _create_text_editor_remote(
     tool_mod,
     agent: _FakeRemoteAgent,
     **args,
 ):
     return tool_mod.TextEditorRemote(agent=agent, args=args)
+
+
+def _create_computer_use_remote(
+    tool_mod,
+    agent: _FakeRemoteAgent,
+    **args,
+):
+    return tool_mod.ComputerUseRemote(agent=agent, args=args)
 
 
 def test_capabilities_advertise_current_ws_contract() -> None:
@@ -282,7 +365,7 @@ def test_capabilities_advertise_current_ws_contract() -> None:
     assert payload["auth_required"] is False
     assert payload["websocket_namespace"] == "/ws"
     assert payload["websocket_handlers"] == ["plugins/_a0_connector/ws_connector"]
-    assert {"pause", "nudge", "remote_file_tree", "code_execution_remote"} <= set(payload["features"])
+    assert {"pause", "nudge", "remote_file_tree", "code_execution_remote", "computer_use_remote"} <= set(payload["features"])
     assert {"settings_get", "settings_set", "agents_list", "model_switcher", "compact_chat"} <= set(payload["features"])
 
 
@@ -365,11 +448,64 @@ def test_ws_connector_hello_advertises_remote_exec_and_tree_features() -> None:
     assert payload["protocol"] == "a0-connector.v1"
     assert "remote_file_tree" in payload["features"]
     assert "code_execution_remote" in payload["features"]
+    assert "computer_use_remote" in payload["features"]
     assert payload["exec_config"]["version"] == 1
     assert payload["exec_config"]["code_exec_timeouts"]["first_output_timeout"] == 12
     assert payload["exec_config"]["output_timeouts"]["max_exec_timeout"] == 120
     assert payload["exec_config"]["prompt_patterns"] == ["PS .+> ?$"]
     assert payload["exec_config"]["dialog_patterns"] == ["yes/no"]
+
+
+def test_plugin_root_resolution_prefers_a0_connector_plugin_root_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugins_root = tmp_path / "plugins"
+    (plugins_root / "_a0_connector").mkdir(parents=True)
+    monkeypatch.setenv("A0_CONNECTOR_PLUGIN_ROOT", str(plugins_root))
+
+    assert _resolve_plugin_root() == plugins_root
+
+
+def test_ws_connector_stores_computer_use_metadata_from_hello() -> None:
+    _install_fake_helpers()
+    ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")
+    _reset_ws_runtime_state(ws_runtime_mod)
+    ws_connector_mod = _reload("plugins._a0_connector.api.ws_connector")
+
+    ws_runtime_mod.register_sid("sid-cli")
+    payload = asyncio.run(
+        ws_connector_mod.WsConnector(None, None).process(
+            "connector_hello",
+            {
+                "computer_use": {
+                    "supported": True,
+                    "enabled": True,
+                    "trust_mode": "persistent",
+                    "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+                    "backend_id": "wayland",
+                    "backend_family": "linux",
+                    "features": ["inline-png-capture", "pointer-injection"],
+                    "support_reason": "Wayland portal backend is available.",
+                }
+            },
+            "sid-cli",
+        )
+    )
+
+    stored = ws_runtime_mod.computer_use_metadata_for_sid("sid-cli")
+    assert payload["exec_config"]["version"] == 1
+    assert stored == {
+        "supported": True,
+        "enabled": True,
+        "trust_mode": "persistent",
+        "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        "backend_id": "wayland",
+        "backend_family": "linux",
+        "features": ["inline-png-capture", "pointer-injection"],
+        "support_reason": "Wayland portal backend is available.",
+        "updated_at": stored["updated_at"],
+    }
 
 
 def test_remote_file_structure_is_injected_as_extras_not_system_prompt() -> None:
@@ -478,6 +614,362 @@ def test_ws_connector_exec_result_resolves_pending_future() -> None:
         assert resolved["result"]["output"] == "42"
 
     asyncio.run(_scenario())
+
+
+def test_ws_connector_computer_use_result_resolves_pending_future() -> None:
+    _install_fake_helpers()
+    ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")
+    _reset_ws_runtime_state(ws_runtime_mod)
+    ws_connector_mod = _reload("plugins._a0_connector.api.ws_connector")
+    handler = ws_connector_mod.WsConnector(None, None)
+
+    async def _scenario() -> None:
+        sid = "sid-cu"
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        ws_runtime_mod.register_sid(sid)
+        ws_runtime_mod.store_pending_computer_use_op(
+            "cu-1",
+            sid=sid,
+            future=future,
+            loop=loop,
+            context_id="ctx-1",
+        )
+
+        result = handler._handle_computer_use_op_result(
+            {
+                "op_id": "cu-1",
+                "ok": True,
+                "result": {"status": "active", "session_id": "sess-1"},
+            },
+            sid,
+        )
+
+        assert result == {"op_id": "cu-1", "accepted": True}
+        resolved = await asyncio.wait_for(future, timeout=0.25)
+        assert resolved["result"]["session_id"] == "sess-1"
+
+    asyncio.run(_scenario())
+
+
+def test_select_computer_use_target_sid_ignores_disabled_or_unsupported_clients() -> None:
+    _install_fake_helpers()
+    ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")
+    _reset_ws_runtime_state(ws_runtime_mod)
+
+    for sid in ("sid-disabled", "sid-unsupported", "sid-enabled"):
+        ws_runtime_mod.register_sid(sid)
+        ws_runtime_mod.subscribe_sid_to_context(sid, "ctx-1")
+
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-disabled",
+        {"supported": True, "enabled": False, "trust_mode": "persistent", "artifact_root": "/a0/tmp"},
+    )
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-unsupported",
+        {"supported": False, "enabled": True, "trust_mode": "persistent", "artifact_root": "/a0/tmp"},
+    )
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-enabled",
+        {"supported": True, "enabled": True, "trust_mode": "persistent", "artifact_root": "/a0/tmp"},
+    )
+
+    assert ws_runtime_mod.select_computer_use_target_sid("ctx-1") == "sid-enabled"
+
+
+def test_computer_use_remote_rejects_when_no_enabled_cli_is_subscribed() -> None:
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=lambda payload: {"op_id": payload["op_id"], "ok": True, "result": {"status": "active"}}
+    )
+    del shared_ws_manager
+    agent = _FakeRemoteAgent()
+
+    ws_runtime_mod.register_sid("sid-disabled")
+    ws_runtime_mod.subscribe_sid_to_context("sid-disabled", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-disabled",
+        {
+            "supported": True,
+            "enabled": False,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(tool_mod, agent, action="status").execute()
+    )
+
+    assert "no subscribed CLI" in response.message
+
+
+def test_computer_use_remote_capture_prefers_inline_png_and_embeds_image_message() -> None:
+    def handler(payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "op_id": payload["op_id"],
+            "ok": True,
+            "result": {
+                "status": "active",
+                "session_id": "sess-1",
+                "png_base64": _PNG_1X1_BASE64,
+                "width": 1,
+                "height": 1,
+            },
+        }
+
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=handler
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-cli",
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(tool_mod, agent, action="capture", session_id="sess-1").execute()
+    )
+
+    assert response.message == "Current screen attached."
+    assert shared_ws_manager.calls[0]["payload"]["action"] == "capture"
+    assert len(agent.history_messages) == 1
+    raw_message = agent.history_messages[0]["content"]
+    assert raw_message["preview"] == "Computer-use capture 1x1."
+    assert raw_message["raw_content"][1]["type"] == "image_url"
+
+
+def test_computer_use_remote_capture_falls_back_to_shared_png_path_when_inline_payload_missing(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "capture.png"
+    image_path.write_bytes(base64.b64decode(_PNG_1X1_BASE64))
+
+    def handler(payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "op_id": payload["op_id"],
+            "ok": True,
+            "result": {
+                "status": "active",
+                "session_id": "sess-1",
+                "host_path": str(image_path),
+                "width": 1,
+                "height": 1,
+            },
+        }
+
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=handler
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-cli",
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(tool_mod, agent, action="capture", session_id="sess-1").execute()
+    )
+
+    assert response.message == "Current screen attached."
+    assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["capture"]
+    assert len(agent.history_messages) == 1
+
+
+def test_computer_use_remote_start_session_auto_refreshes_screen() -> None:
+    def handler(payload: dict[str, object]) -> dict[str, object]:
+        if payload["action"] == "start_session":
+            return {
+                "op_id": payload["op_id"],
+                "ok": True,
+                "result": {
+                    "status": "active",
+                    "session_id": "sess-1",
+                    "width": 1,
+                    "height": 1,
+                },
+            }
+        return {
+            "op_id": payload["op_id"],
+            "ok": True,
+            "result": {
+                "status": "active",
+                "session_id": "sess-1",
+                "png_base64": _PNG_1X1_BASE64,
+                "width": 1,
+                "height": 1,
+            },
+        }
+
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=handler
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-cli",
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(tool_mod, agent, action="start_session").execute()
+    )
+
+    assert response.message == "Computer-use session started: session_id=sess-1 size=1x1 Latest screen attached."
+    assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["start_session", "capture"]
+    assert len(agent.history_messages) == 1
+
+
+def test_computer_use_remote_click_auto_refreshes_screen() -> None:
+
+    def handler(payload: dict[str, object]) -> dict[str, object]:
+        if payload["action"] == "click":
+            return {
+                "op_id": payload["op_id"],
+                "ok": True,
+                "result": {
+                    "button": "left",
+                    "count": 1,
+                    "session_id": "sess-1",
+                },
+            }
+        return {
+            "op_id": payload["op_id"],
+            "ok": True,
+            "result": {
+                "status": "active",
+                "session_id": "sess-1",
+                "png_base64": _PNG_1X1_BASE64,
+                "width": 1,
+                "height": 1,
+            },
+        }
+
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=handler
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-cli",
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(tool_mod, agent, action="click", session_id="sess-1").execute()
+    )
+
+    assert response.message == "Clicked left button 1 time(s). Latest screen attached."
+    assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["click", "capture"]
+    assert len(agent.history_messages) == 1
+
+
+def test_computer_use_remote_type_submit_sends_submit_flag_and_auto_refreshes_screen() -> None:
+
+    def handler(payload: dict[str, object]) -> dict[str, object]:
+        if payload["action"] == "type":
+            return {
+                "op_id": payload["op_id"],
+                "ok": True,
+                "result": {
+                    "text": payload["text"],
+                    "submitted": bool(payload.get("submit")),
+                    "session_id": "sess-1",
+                },
+            }
+        return {
+            "op_id": payload["op_id"],
+            "ok": True,
+            "result": {
+                "status": "active",
+                "session_id": "sess-1",
+                "png_base64": _PNG_1X1_BASE64,
+                "width": 1,
+                "height": 1,
+            },
+        }
+
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=handler
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-cli",
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(
+            tool_mod,
+            agent,
+            action="type",
+            session_id="sess-1",
+            text="Hello from Agent Zero",
+            submit=True,
+        ).execute()
+    )
+
+    assert response.message == "Typed 21 character(s) and submitted. Latest screen attached."
+    assert shared_ws_manager.calls[0]["payload"]["submit"] is True
+    assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["type", "capture"]
+    assert len(agent.history_messages) == 1
+
+
+def test_computer_use_remote_invalid_numeric_args_return_message() -> None:
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
+        computer_use_handler=lambda payload: {"op_id": payload["op_id"], "ok": True, "result": {"status": "active"}}
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        "sid-cli",
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    response = asyncio.run(
+        _create_computer_use_remote(tool_mod, agent, action="click", count="two").execute()
+    )
+
+    assert response.message == "computer_use_remote: count must be an integer"
+    assert shared_ws_manager.calls == []
 
 
 def test_text_editor_remote_patch_requires_prior_read(tmp_path: Path) -> None:

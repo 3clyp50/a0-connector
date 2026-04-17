@@ -90,7 +90,11 @@ class RemoteFileUtility:
             return {"op_id": op_id, "ok": False, "error": str(exc)}
 
     def _expand_file_path(self, path: str) -> str:
-        return os.path.abspath(os.path.expanduser(path))
+        normalized = str(path or "").replace("\\", os.sep)
+        expanded = os.path.expanduser(normalized)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(self.scan_root, expanded)
+        return os.path.abspath(expanded)
 
     def _count_content_lines(self, content: str) -> int:
         return content.count("\n") + (

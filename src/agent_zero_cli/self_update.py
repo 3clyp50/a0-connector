@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 
-DEFAULT_PACKAGE_SPEC = "a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip"
+DEFAULT_PACKAGE_SPEC = "a0"
 
 
 @dataclass(frozen=True)

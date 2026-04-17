@@ -17,7 +17,14 @@ from agent_zero_cli.client import (
     A0WebSocketConnectionError,
     _ensure_aiohttp_ws_timeout_compat,
 )
-from agent_zero_cli.config import load_config, save_env, save_last_context
+from agent_zero_cli.config import (
+    load_config,
+    save_computer_use_enabled,
+    save_computer_use_restore_token,
+    save_computer_use_trust_mode,
+    save_env,
+    save_last_context,
+)
 
 
 pytestmark = pytest.mark.anyio
@@ -217,6 +224,69 @@ def test_save_last_context_updates_host_and_context(
     assert "AGENT_ZERO_LAST_CONTEXT_ID=ctx-9" in contents
 
 
+def test_load_config_reads_computer_use_defaults_and_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_dir = tmp_path / ".agent-zero"
+    env_dir.mkdir()
+    env_file = env_dir / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "AGENT_ZERO_COMPUTER_USE_ENABLED=1",
+                "AGENT_ZERO_COMPUTER_USE_TRUST_MODE=interactive",
+                "AGENT_ZERO_COMPUTER_USE_RESTORE_TOKEN=dotenv-token",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    import agent_zero_cli.config as config_mod
+
+    monkeypatch.setattr(config_mod, "_ENV_DIR", env_dir)
+    monkeypatch.setattr(config_mod, "_ENV_FILE", env_file)
+
+    dotenv_config = load_config()
+    assert dotenv_config.computer_use_enabled is True
+    assert dotenv_config.computer_use_trust_mode == "interactive"
+    assert dotenv_config.computer_use_restore_token == "dotenv-token"
+
+    monkeypatch.setenv("AGENT_ZERO_COMPUTER_USE_ENABLED", "0")
+    monkeypatch.setenv("AGENT_ZERO_COMPUTER_USE_TRUST_MODE", "free_run")
+    monkeypatch.setenv("AGENT_ZERO_COMPUTER_USE_RESTORE_TOKEN", "env-token")
+
+    env_config = load_config()
+    assert env_config.computer_use_enabled is False
+    assert env_config.computer_use_trust_mode == "free_run"
+    assert env_config.computer_use_restore_token == "env-token"
+
+
+def test_save_computer_use_settings_persist_to_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_dir = tmp_path / ".agent-zero"
+    env_dir.mkdir()
+    env_file = env_dir / ".env"
+
+    import agent_zero_cli.config as config_mod
+
+    monkeypatch.setattr(config_mod, "_ENV_DIR", env_dir)
+    monkeypatch.setattr(config_mod, "_ENV_FILE", env_file)
+
+    save_computer_use_enabled(True)
+    save_computer_use_trust_mode("free_run")
+    save_computer_use_restore_token("restore-token")
+    save_computer_use_restore_token("")
+
+    contents = env_file.read_text(encoding="utf-8").splitlines()
+    assert "AGENT_ZERO_COMPUTER_USE_ENABLED=1" in contents
+    assert "AGENT_ZERO_COMPUTER_USE_TRUST_MODE=free_run" in contents
+    assert not any(line.startswith("AGENT_ZERO_COMPUTER_USE_RESTORE_TOKEN=") for line in contents)
+
+
 async def test_fetch_capabilities_raises_plugin_missing_on_404() -> None:
     client = A0Client("http://localhost:5080")
     client.http = Mock()
@@ -367,6 +437,26 @@ async def test_send_hello_returns_exec_config_payload() -> None:
     assert payload["protocol"] == "a0-connector.v1"
 
 
+async def test_send_hello_includes_computer_use_metadata() -> None:
+    client = A0Client("http://127.0.0.1:50001")
+    client.sio = FakeSocketIOClient(
+        call_response={"results": [{"ok": True, "data": {"protocol": "a0-connector.v1"}}]}
+    )
+
+    metadata = {
+        "supported": True,
+        "enabled": True,
+        "trust_mode": "persistent",
+        "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+    }
+    await client.send_hello(computer_use=metadata)
+
+    event, payload, namespace = client.sio.call_calls[0]
+    assert event == "connector_hello"
+    assert namespace == "/ws"
+    assert payload["computer_use"] == metadata
+
+
 async def test_pause_agent_normalizes_http_failure() -> None:
     client = A0Client("http://localhost:5080")
     client.http = Mock()
@@ -436,6 +526,71 @@ async def test_exec_op_requests_are_returned_via_result_event() -> None:
         (
             "connector_exec_op_result",
             {"op_id": "exec-1", "ok": True, "result": {"runtime": "python"}},
+            "/ws",
+        )
+    ]
+
+
+async def test_registers_computer_use_ws_handler_and_emits_result() -> None:
+    client = A0Client("http://127.0.0.1:50001")
+    client.http = Mock()
+    client.http.get = AsyncMock(
+        return_value=FakeResponse(
+            status_code=200,
+            text='0{"sid":"sid-1","upgrades":["websocket"],"pingInterval":25000,"pingTimeout":20000}',
+        )
+    )
+    client.sio = FakeSocketIOClient()
+    client.on_computer_use_op = AsyncMock(
+        return_value={"op_id": "cu-1", "ok": True, "result": {"status": "active"}}
+    )
+
+    await client.connect_websocket()
+
+    handler = client.sio.handlers[("/ws", "connector_computer_use_op")]
+    await handler({"data": {"op_id": "cu-1", "action": "status", "context_id": "ctx-1"}})
+
+    client.on_computer_use_op.assert_awaited_once()
+    assert client.sio.emit_calls == [
+        (
+            "connector_computer_use_op_result",
+            {"op_id": "cu-1", "ok": True, "result": {"status": "active"}},
+            "/ws",
+        )
+    ]
+
+
+async def test_computer_use_handler_error_is_serialized() -> None:
+    client = A0Client("http://127.0.0.1:50001")
+    client.http = Mock()
+    client.http.get = AsyncMock(
+        return_value=FakeResponse(
+            status_code=200,
+            text='0{"sid":"sid-1","upgrades":["websocket"],"pingInterval":25000,"pingTimeout":20000}',
+        )
+    )
+    client.sio = FakeSocketIOClient()
+
+    async def failing_handler(payload: dict[str, object]) -> dict[str, object]:
+        del payload
+        raise RuntimeError("portal unavailable")
+
+    client.on_computer_use_op = failing_handler
+
+    await client.connect_websocket()
+
+    handler = client.sio.handlers[("/ws", "connector_computer_use_op")]
+    await handler({"data": {"op_id": "cu-2", "action": "status", "context_id": "ctx-1"}})
+
+    assert client.sio.emit_calls == [
+        (
+            "connector_computer_use_op_result",
+            {
+                "op_id": "cu-2",
+                "ok": False,
+                "error": "portal unavailable",
+                "code": "COMPUTER_USE_ERROR",
+            },
             "/ws",
         )
     ]

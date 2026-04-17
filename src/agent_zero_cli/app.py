@@ -29,6 +29,7 @@ from agent_zero_cli.clipboard import (
     copy_text_to_windows_clipboard,
     should_use_native_windows_clipboard,
 )
+from agent_zero_cli.computer_use import ComputerUseManager
 from agent_zero_cli.commands import CommandAvailability, CommandSpec
 from agent_zero_cli.config import CLIConfig, load_config, save_last_context
 from agent_zero_cli.instance_discovery import DiscoveryResult, discover_local_instances
@@ -79,6 +80,14 @@ class AgentZeroCLI(App):
     # Keep the canonical key names here and use `key_display` for the footer.
     BINDINGS = [
         Binding("Ctrl+C", "Quit", "Exit", show=True),
+        Binding(
+            "f2",
+            "toggle_computer_use",
+            "Comp-use OFF",
+            show=True,
+            priority=True,
+            key_display="F2",
+        ),
         Binding(
             "f3",
             "toggle_remote_file_mode",
@@ -149,6 +158,10 @@ class AgentZeroCLI(App):
             cwd=self._remote_files.scan_root,
             enabled=self._remote_exec_enabled,
         )
+        self._computer_use = ComputerUseManager(self.config)
+        self._computer_use.set_status_callback(
+            lambda label, detail: self._run_on_ui(self._apply_computer_use_status, label, detail)
+        )
         self._local_workspace = self._remote_files.scan_root
         self._remote_workspace = ""
         self._token_refresh_task: asyncio.Task[None] | None = None
@@ -198,6 +211,7 @@ class AgentZeroCLI(App):
         self._sync_workspace_widgets()
         self.query_one("#connection-status", ConnectionStatus).clear_token_usage()
         self._clear_project_state()
+        self._sync_computer_use_status()
         self._sync_composer_visibility()
 
         log = self.query_one("#chat-log", ChatLog)
@@ -221,6 +235,33 @@ class AgentZeroCLI(App):
                     name=worker_name,
                 ),
             )
+        yield SystemCommand(
+            "Computer Use: Interactive",
+            "Switch local computer use to interactive approvals.",
+            lambda: self.run_worker(
+                self._set_computer_use_mode("interactive"),
+                exclusive=True,
+                name="palette-computer-use-interactive",
+            ),
+        )
+        yield SystemCommand(
+            "Computer Use: Persistent",
+            "Switch local computer use to persistent portal restore mode.",
+            lambda: self.run_worker(
+                self._set_computer_use_mode("persistent"),
+                exclusive=True,
+                name="palette-computer-use-persistent",
+            ),
+        )
+        yield SystemCommand(
+            "Computer Use: Free-Run",
+            "Switch local computer use to restore-only free_run mode.",
+            lambda: self.run_worker(
+                self._set_computer_use_mode("free_run"),
+                exclusive=True,
+                name="palette-computer-use-free-run",
+            ),
+        )
 
     def _build_command_registry(self) -> tuple[CommandSpec, ...]:
         return (
@@ -365,6 +406,7 @@ class AgentZeroCLI(App):
         widget.set_project_enabled(
             self.connected and bool(self.current_context) and "projects" in self.connector_features
         )
+        widget.set_computer_use_state(self._computer_use.status_label, self._computer_use.status_detail)
 
     def _set_token_usage(self, token_count: object, token_limit: object = None) -> None:
         self.query_one("#connection-status", ConnectionStatus).set_token_usage(token_count, token_limit)
@@ -697,6 +739,19 @@ class AgentZeroCLI(App):
     def _sync_composer_visibility(self) -> None:
         splash_helpers.sync_composer_visibility(self)
 
+    def _apply_computer_use_status(self, label: str, detail: str) -> None:
+        del label, detail
+        self._sync_computer_use_status()
+
+    def _sync_computer_use_status(self) -> None:
+        try:
+            self.query_one("#connection-status", ConnectionStatus).set_computer_use_state(
+                self._computer_use.status_label,
+                self._computer_use.status_detail,
+            )
+        except Exception:
+            return
+
     def _set_activity(self, label: str, detail: str = "") -> None:
         self.query_one("#message-input", ChatInput).set_activity(label, detail)
 
@@ -717,6 +772,8 @@ class AgentZeroCLI(App):
         splash_helpers.show_notice(self, message, error=error)
 
     def get_binding_description(self, binding: Binding) -> str:
+        if binding.action == "toggle_computer_use":
+            return "Comp-use ON" if self._computer_use.enabled else "Comp-use OFF"
         if binding.action == "toggle_remote_file_mode":
             return "Read&Write" if self._remote_file_write_enabled else "Read-only"
         if binding.action == "toggle_remote_exec":
@@ -915,6 +972,21 @@ class AgentZeroCLI(App):
 
     async def _handle_exec_op(self, data: dict[str, Any]) -> dict[str, Any]:
         return await event_handlers.handle_exec_op(self, data)
+
+    async def _handle_computer_use_op(self, data: dict[str, Any]) -> dict[str, Any]:
+        return await event_handlers.handle_computer_use_op(self, data)
+
+    def _computer_use_metadata(self) -> dict[str, Any]:
+        return self._computer_use.metadata()
+
+    async def _refresh_computer_use_metadata(self) -> None:
+        if not self.client.connected:
+            return
+        try:
+            hello = await self.client.send_hello(computer_use=self._computer_use_metadata())
+        except Exception:
+            return
+        self._python_tty.set_exec_config(hello.get("exec_config") if isinstance(hello, dict) else None)
 
     def _start_remote_tree_publisher(self) -> None:
         event_handlers.start_remote_tree_publisher(self)
@@ -1197,6 +1269,12 @@ class AgentZeroCLI(App):
     async def _cmd_nudge(self) -> None:
         await chat_commands.cmd_nudge(self)
 
+    async def _set_computer_use_mode(self, mode: str) -> None:
+        selected = self._computer_use.set_trust_mode(mode)
+        await self._refresh_computer_use_metadata()
+        self._show_notice(f"Computer use trust mode set to {selected}.")
+        self._sync_computer_use_status()
+
     async def _disconnect_and_exit(self) -> None:
         await connection.disconnect_and_exit(self)
 
@@ -1205,6 +1283,18 @@ class AgentZeroCLI(App):
 
     async def action_clear_chat(self) -> None:
         await self._cmd_clear()
+
+    async def action_toggle_computer_use(self) -> None:
+        enabled = not self._computer_use.enabled
+        self._computer_use.set_enabled(enabled)
+        if not enabled:
+            await self._computer_use.disconnect()
+        await self._refresh_computer_use_metadata()
+        state = "enabled" if self._computer_use.enabled else "disabled"
+        self._show_notice(
+            f"Computer use {state} for this CLI session ({self._computer_use.trust_mode})."
+        )
+        self._sync_computer_use_status()
 
     async def action_toggle_remote_file_mode(self) -> None:
         self._set_remote_file_write_enabled(not self._remote_file_write_enabled)

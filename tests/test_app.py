@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from rich.panel import Panel
 from textual.app import App, ComposeResult
@@ -129,6 +131,8 @@ class FakeConnectionStatus:
         self.url = ""
         self.project_enabled = False
         self.project_state = None
+        self.computer_use_status = ""
+        self.computer_use_detail = ""
 
     def set_project_enabled(self, enabled: bool) -> None:
         self.project_enabled = enabled
@@ -137,8 +141,62 @@ class FakeConnectionStatus:
         self.project_state = project
         self.project_enabled = enabled
 
+    def set_computer_use_state(self, status: str, detail: str = "") -> None:
+        self.computer_use_status = status
+        self.computer_use_detail = detail
+
     def clear_token_usage(self) -> None:
         return None
+
+
+class FakeComputerUseManager:
+    def __init__(self) -> None:
+        self.enabled = False
+        self.trust_mode = "persistent"
+        self.status_label = "disabled"
+        self.status_detail = ""
+        self.disconnect_calls = 0
+        self.handled_ops: list[dict[str, object]] = []
+        self._status_callback = None
+
+    def set_status_callback(self, callback) -> None:
+        self._status_callback = callback
+        if callback is not None:
+            callback(self.status_label, self.status_detail)
+
+    def _emit(self) -> None:
+        if self._status_callback is not None:
+            self._status_callback(self.status_label, self.status_detail)
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.status_label = self.trust_mode if enabled else "disabled"
+        self.status_detail = ""
+        self._emit()
+
+    def set_trust_mode(self, mode: str) -> str:
+        self.trust_mode = mode
+        if self.enabled:
+            self.status_label = mode
+        self._emit()
+        return mode
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "supported": True,
+            "enabled": self.enabled,
+            "trust_mode": self.trust_mode,
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        }
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.status_label = "disabled" if not self.enabled else self.trust_mode
+        self._emit()
+
+    async def handle_op(self, data: dict[str, object]) -> dict[str, object]:
+        self.handled_ops.append(dict(data))
+        return {"op_id": data.get("op_id"), "ok": True, "result": {"status": "active"}}
 
 
 class DummyAgentZeroCLI(AgentZeroCLI):
@@ -172,6 +230,7 @@ class TranscriptSelectionApp(App[None]):
 @pytest.fixture
 def dummy_app(monkeypatch: pytest.MonkeyPatch) -> DummyAgentZeroCLI:
     app = DummyAgentZeroCLI()
+    app._computer_use = FakeComputerUseManager()
     widgets = {
         "#chat-log": FakeChatLog(),
         "#message-input": FakeInput(),
@@ -186,6 +245,7 @@ def dummy_app(monkeypatch: pytest.MonkeyPatch) -> DummyAgentZeroCLI:
 
     app.query_one = _query_one  # type: ignore[method-assign]
     app._test_widgets = widgets  # type: ignore[attr-defined]
+    app._computer_use.set_status_callback(lambda label, detail: app._apply_computer_use_status(label, detail))
     monkeypatch.setattr(
         "agent_zero_cli.app.render_connector_event",
         lambda log, event: app.rendered_events.append(event) or True,
@@ -206,6 +266,8 @@ def test_default_client_host_uses_splash_default() -> None:
 def test_shortcut_bindings_use_textual_canonical_key_names() -> None:
     bindings = {binding.action: binding for binding in AgentZeroCLI.BINDINGS}
 
+    assert bindings["toggle_computer_use"].key == "f2"
+    assert bindings["toggle_computer_use"].key_display == "F2"
     assert bindings["toggle_remote_file_mode"].key == "f3"
     assert bindings["toggle_remote_file_mode"].key_display == "F3"
     assert bindings["toggle_remote_exec"].key == "f4"
@@ -220,6 +282,19 @@ def test_shortcut_bindings_use_textual_canonical_key_names() -> None:
     assert bindings["pause_agent"].key_display == "F8"
     assert bindings["command_palette"].key == "ctrl+p"
     assert bindings["command_palette"].key_display == "^P"
+
+
+def test_get_binding_description_reflects_computer_use_toggle_state(
+    dummy_app: DummyAgentZeroCLI,
+) -> None:
+    bindings = {binding.action: binding for binding in AgentZeroCLI.BINDINGS}
+    computer_use_binding = bindings["toggle_computer_use"]
+
+    assert dummy_app.get_binding_description(computer_use_binding) == "Comp-use OFF"
+
+    dummy_app._computer_use.set_enabled(True)
+
+    assert dummy_app.get_binding_description(computer_use_binding) == "Comp-use ON"
 
 
 def test_apply_instance_discovery_result_autoconnects_single_instance(
@@ -610,6 +685,159 @@ async def test_remote_safety_toggles_update_local_permissions(
     assert dummy_app._remote_exec_enabled is True
     assert dummy_app._remote_files.allow_writes is True
     assert dummy_app._python_tty.enabled is True
+
+
+async def test_action_toggle_computer_use_updates_notice_and_status(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notices: list[tuple[str, bool]] = []
+    monkeypatch.setattr(dummy_app, "_show_notice", lambda message, *, error=False: notices.append((message, error)))
+
+    await dummy_app.action_toggle_computer_use()
+
+    status = dummy_app._test_widgets["#connection-status"]  # type: ignore[index]
+    assert dummy_app._computer_use.enabled is True
+    assert status.computer_use_status == "persistent"
+    assert notices == [("Computer use enabled for this CLI session (persistent).", False)]
+
+    await dummy_app.action_toggle_computer_use()
+
+    assert dummy_app._computer_use.enabled is False
+    assert dummy_app._computer_use.disconnect_calls == 1
+    assert status.computer_use_status == "disabled"
+
+
+async def test_action_toggle_computer_use_refreshes_hello_metadata_when_connected(
+    dummy_app: DummyAgentZeroCLI,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def fake_send_hello(*, computer_use: dict[str, object] | None = None) -> dict[str, object]:
+        calls.append(dict(computer_use or {}))
+        return {"exec_config": {"version": 1}}
+
+    dummy_app.client.connected = True
+    dummy_app.client.send_hello = fake_send_hello  # type: ignore[method-assign]
+
+    await dummy_app.action_toggle_computer_use()
+    await dummy_app.action_toggle_computer_use()
+
+    assert calls == [
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+        {
+            "supported": True,
+            "enabled": False,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    ]
+
+
+def test_system_commands_include_interactive_persistent_and_free_run(
+    dummy_app: DummyAgentZeroCLI,
+) -> None:
+    commands = list(dummy_app.get_system_commands(None))
+    titles = {getattr(command, "title", getattr(command, "name", "")) for command in commands}
+
+    assert "Computer Use: Interactive" in titles
+    assert "Computer Use: Persistent" in titles
+    assert "Computer Use: Free-Run" in titles
+
+
+async def test_set_computer_use_mode_updates_status_for_free_run_and_persistent(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notices: list[tuple[str, bool]] = []
+    monkeypatch.setattr(dummy_app, "_show_notice", lambda message, *, error=False: notices.append((message, error)))
+    dummy_app._computer_use.set_enabled(True)
+
+    await dummy_app._set_computer_use_mode("free_run")
+    status = dummy_app._test_widgets["#connection-status"]  # type: ignore[index]
+    assert dummy_app._computer_use.trust_mode == "free_run"
+    assert status.computer_use_status == "free_run"
+
+    await dummy_app._set_computer_use_mode("persistent")
+    assert dummy_app._computer_use.trust_mode == "persistent"
+    assert status.computer_use_status == "persistent"
+    assert notices == [
+        ("Computer use trust mode set to free_run.", False),
+        ("Computer use trust mode set to persistent.", False),
+    ]
+
+
+async def test_set_computer_use_mode_refreshes_hello_metadata_when_connected(
+    dummy_app: DummyAgentZeroCLI,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def fake_send_hello(*, computer_use: dict[str, object] | None = None) -> dict[str, object]:
+        calls.append(dict(computer_use or {}))
+        return {"exec_config": {"version": 1}}
+
+    dummy_app.client.connected = True
+    dummy_app.client.send_hello = fake_send_hello  # type: ignore[method-assign]
+    dummy_app._computer_use.set_enabled(True)
+
+    await dummy_app._set_computer_use_mode("free_run")
+    await dummy_app._set_computer_use_mode("persistent")
+
+    assert calls == [
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "free_run",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    ]
+
+
+def test_sync_computer_use_status_surfaces_rearm_required_state(
+    dummy_app: DummyAgentZeroCLI,
+) -> None:
+    dummy_app._computer_use.status_label = "rearm required"
+    dummy_app._computer_use.status_detail = "COMPUTER_USE_REARM_REQUIRED"
+
+    dummy_app._sync_computer_use_status()
+
+    status = dummy_app._test_widgets["#connection-status"]  # type: ignore[index]
+    assert status.computer_use_status == "rearm required"
+    assert status.computer_use_detail == "COMPUTER_USE_REARM_REQUIRED"
+
+
+async def test_reset_disconnected_state_disconnects_computer_use_manager(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def async_noop(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(dummy_app, "_cancel_compaction_refresh", lambda: None)
+    monkeypatch.setattr(dummy_app, "_stop_remote_tree_publisher", lambda: None)
+    monkeypatch.setattr(dummy_app, "_stop_token_refresh", lambda: None)
+    monkeypatch.setattr(dummy_app, "_clear_token_usage", lambda: None)
+    monkeypatch.setattr(dummy_app, "_clear_project_state", lambda: None)
+    monkeypatch.setattr(dummy_app, "_set_workspace_context", lambda remote_workspace="": None)
+    monkeypatch.setattr(dummy_app, "_clear_model_switcher", lambda: None)
+    monkeypatch.setattr(dummy_app, "_sync_body_mode", lambda: None)
+    monkeypatch.setattr(dummy_app._python_tty, "close", async_noop)
+
+    connection._reset_disconnected_state(dummy_app)
+    await asyncio.sleep(0)
+
+    assert dummy_app._computer_use.disconnect_calls == 1
 
 
 def test_copy_to_clipboard_mirrors_to_native_windows_clipboard(

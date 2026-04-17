@@ -44,7 +44,7 @@ def _load_updater_namespace() -> dict[str, object]:
     return namespace
 
 
-def test_resolve_package_spec_defaults_to_main_zip() -> None:
+def test_resolve_package_spec_defaults_to_stable_release() -> None:
     assert self_update.resolve_package_spec({}) == self_update.DEFAULT_PACKAGE_SPEC
 
 
@@ -165,13 +165,13 @@ def test_generated_updater_script_waits_then_runs_uv_on_success(
     monkeypatch.setattr(namespace["shutil"], "which", lambda name: "uv")
     monkeypatch.setattr(namespace["subprocess"], "run", fake_run)
 
-    exit_code = namespace["main"](["123", "a0 @ https://example.invalid/main.zip"])
+    exit_code = namespace["main"](["123", "a0"])
 
     captured = capsys.readouterr()
     assert exit_code == 0
     assert sleep_calls == [0.1, 0.1]
     assert run_calls == [
-        (["uv", "tool", "install", "--upgrade", "a0 @ https://example.invalid/main.zip"], False)
+        (["uv", "tool", "install", "--upgrade", "a0"], False)
     ]
     assert captured.out.strip().endswith("Update complete. Run a0.")
 

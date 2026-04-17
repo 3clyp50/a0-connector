@@ -31,17 +31,19 @@ irm https://raw.githubusercontent.com/agent0ai/a0-connector/main/install.ps1 | i
 a0
 ```
 
+The `a0` release pulls in the matching computer-use backend automatically: `a0-computer-use-wayland` on Linux and `a0-computer-use-windows` on Windows. Package names are already reserved for `a0-computer-use-x11` and `a0-computer-use-macos`.
+
 ## Manual install
 
-If you already use `uv`, you can install the CLI directly from a GitHub source
-archive. `uv` will pick a compatible Python for the tool environment and can
-download one if needed, without requiring `git` to be installed:
+If you already use `uv`, you can install the stable `a0` release directly.
+`uv` will pick a compatible Python for the tool environment and can download
+one if needed, without requiring `git` to be installed:
 
 ```bash
-uv tool install --upgrade "a0 @ https://github.com/agent0ai/a0-connector/archive/refs/heads/main.zip"
+uv tool install --upgrade a0
 ```
 
-Advanced one-off runs with `uvx` also work, but they are intentionally not the primary install path for this project.
+Advanced one-off runs with `uvx` also work, but they are intentionally not the primary install path for this project. For development channels, set `A0_PACKAGE_SPEC` to a source or archive spec before running `uv tool install` or `a0 update`.
 
 ## Update
 
@@ -51,7 +53,7 @@ If you installed `a0` with the standard `uv tool` flow, update it in place with:
 a0 update
 ```
 
-By default `a0 update` follows the same `main.zip` channel as the installer and manual `uv tool install --upgrade` command above. For advanced cases you can override the package source by setting `A0_PACKAGE_SPEC` before running `a0 update`.
+By default `a0 update` follows the stable `a0` release channel used by the installer and manual `uv tool install --upgrade` command above. For advanced cases you can override the package source by setting `A0_PACKAGE_SPEC` before running `a0 update`.
 
 `a0 update` requires `uv` to be available on your `PATH`.
 
