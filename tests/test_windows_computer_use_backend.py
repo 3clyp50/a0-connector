@@ -161,6 +161,26 @@ def test_windows_runtime_capture_returns_inline_png_payload(tmp_path: Path) -> N
     assert base64.b64decode(capture["png_base64"])
 
 
+def test_windows_runtime_capture_writes_requested_path_without_inline_payload(tmp_path: Path) -> None:
+    runtime = WindowsComputerUseRuntime(driver=_FakeDriver(), state_dir=tmp_path / "state")
+    runtime.start_session(
+        {
+            "context_id": "ctx-1",
+            "trust_mode": "persistent",
+            "restore_token": "123e4567-e89b-12d3-a456-426614174000",
+        }
+    )
+    capture_path = tmp_path / "captures" / "capture.png"
+
+    capture = runtime.capture({"context_id": "ctx-1", "capture_path": str(capture_path)})
+
+    assert capture["width"] == 1
+    assert capture["height"] == 1
+    assert capture["capture_path"] == str(capture_path)
+    assert "png_base64" not in capture
+    assert capture_path.exists()
+
+
 def test_windows_runtime_normalizes_actions_and_routes_input(tmp_path: Path) -> None:
     driver = _FakeDriver()
     runtime = WindowsComputerUseRuntime(driver=driver, state_dir=tmp_path / "state")

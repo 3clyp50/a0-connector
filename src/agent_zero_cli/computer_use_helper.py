@@ -194,7 +194,6 @@ class CaptureStream:
         image.save(buffer, format="PNG")
         png_bytes = buffer.getvalue()
         result = {
-            "png_base64": base64.b64encode(png_bytes).decode("ascii"),
             "width": width,
             "height": height,
             "captured_at": time.time(),
@@ -203,6 +202,8 @@ class CaptureStream:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(png_bytes)
             result["capture_path"] = output_path
+        else:
+            result["png_base64"] = base64.b64encode(png_bytes).decode("ascii")
         return result
 
     def _start_pipeline(self) -> None:

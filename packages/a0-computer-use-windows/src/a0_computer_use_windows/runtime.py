@@ -525,18 +525,26 @@ class WindowsComputerUseRuntime:
         result = {
             "session_id": session.session.session_id,
             "context_id": session.session.context_id,
-            "png_base64": base64.b64encode(png_bytes).decode("ascii"),
             "width": width,
             "height": height,
             "captured_at": time.time(),
         }
-        if self._capture_debug_dir is not None:
+        capture_path_value = str(params.get("capture_path") or "").strip()
+        if capture_path_value:
+            capture_path = Path(capture_path_value)
+            capture_path.parent.mkdir(parents=True, exist_ok=True)
+            capture_path.write_bytes(png_bytes)
+            result["capture_path"] = str(capture_path)
+        elif self._capture_debug_dir is not None:
             debug_path = self._capture_debug_dir / safe_context_segment(session.session.context_id)
             debug_path.mkdir(parents=True, exist_ok=True)
             filename = f"{uuid.uuid4().hex}.png"
             capture_path = debug_path / filename
             capture_path.write_bytes(png_bytes)
             result["capture_path"] = str(capture_path)
+            result["png_base64"] = base64.b64encode(png_bytes).decode("ascii")
+        else:
+            result["png_base64"] = base64.b64encode(png_bytes).decode("ascii")
         return result
 
     def move(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -508,13 +508,29 @@ class ComputerUseManager:
                 message="Requested session_id does not match the active computer-use session",
             )
 
-        response = await self._helper_request(
-            session,
-            {
-                **request,
-                "session_id": session.session_id,
-            },
-        )
+        action_name = str(request.get("action", "")).strip().lower()
+        helper_request = {
+            **request,
+            "session_id": session.session_id,
+        }
+        capture_host_path = ""
+        capture_container_path = ""
+        if action_name == "capture":
+            capture_host_path, capture_container_path = self._next_capture_paths(session.context_id)
+            helper_request["capture_path"] = capture_host_path
+
+        response = await self._helper_request(session, helper_request)
+        if action_name == "capture" and bool(response.get("ok")) and isinstance(response.get("result"), dict):
+            result_dict = dict(response["result"])
+            if capture_host_path:
+                result_dict.setdefault("host_path", capture_host_path)
+                result_dict.setdefault("capture_path", capture_host_path)
+            if capture_container_path:
+                result_dict.setdefault("container_path", capture_container_path)
+            response = {
+                **response,
+                "result": result_dict,
+            }
         return self._normalize_helper_response(op_id, session, response, action=str(request.get("action", "")))
 
     async def _start_session(self, op_id: str, session: _HelperSession) -> dict[str, Any]:
@@ -689,12 +705,7 @@ class ComputerUseManager:
             path = Path(candidate)
             if not path.exists():
                 continue
-            try:
-                png_bytes = path.read_bytes()
-            except OSError:
-                continue
             normalized = dict(result)
-            normalized["png_base64"] = base64.b64encode(png_bytes).decode("ascii")
             normalized.setdefault("capture_path", candidate)
             return normalized
         return result

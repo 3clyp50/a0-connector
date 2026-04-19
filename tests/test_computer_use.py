@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agent_zero_cli import computer_use_backend as backend_mod
-from agent_zero_cli.computer_use import ComputerUseManager, _HelperSession
+from agent_zero_cli.computer_use import (
+    CONTAINER_ARTIFACT_ROOT,
+    HOST_ARTIFACT_ROOT,
+    ComputerUseManager,
+    _HelperSession,
+)
 from agent_zero_cli.computer_use_backend import (
     ComputerUseBackendSelection,
     ComputerUseBackendSpec,
@@ -306,11 +311,12 @@ async def test_capture_normalizes_inline_png_base64_response(
 
     assert result["ok"] is True
     assert result["result"]["png_base64"] == base64.b64encode(payload).decode("ascii")
-    assert "host_path" not in result["result"]
-    assert "capture_path" not in result["result"]
+    assert result["result"]["host_path"].startswith(str(HOST_ARTIFACT_ROOT / "ctx-1"))
+    assert result["result"]["capture_path"] == result["result"]["host_path"]
+    assert result["result"]["container_path"].startswith(f"{CONTAINER_ARTIFACT_ROOT}/ctx-1/")
 
 
-async def test_capture_migration_fallback_reads_legacy_path_based_result(
+async def test_capture_preserves_path_based_result_without_reinlining_png(
     _temp_env: Path,
     tmp_path: Path,
 ) -> None:
@@ -338,8 +344,41 @@ async def test_capture_migration_fallback_reads_legacy_path_based_result(
     )
 
     assert result["ok"] is True
-    assert base64.b64decode(result["result"]["png_base64"]) == payload
+    assert "png_base64" not in result["result"]
     assert result["result"]["host_path"] == str(capture_path)
+
+
+async def test_capture_requests_shared_artifact_path_and_adds_container_path(
+    _temp_env: Path,
+) -> None:
+    manager = _manager(enabled=True)
+
+    async def helper_request(_session: _HelperSession, request: dict[str, object]) -> dict[str, object]:
+        capture_path = str(request.get("capture_path") or "")
+        return {
+            "ok": True,
+            "result": {
+                "capture_path": capture_path,
+                "width": 640,
+                "height": 480,
+                "session_id": "sess-1",
+            },
+        }
+
+    manager._helper_request = helper_request  # type: ignore[method-assign]
+    session = _HelperSession(context_id="ctx-1", session_id="sess-1", active=True)
+    session.process = type("FakeProcess", (), {"returncode": None})()
+    manager._sessions["ctx-1"] = session
+
+    result = await manager.handle_op(
+        {"op_id": "cap-2", "action": "capture", "context_id": "ctx-1", "session_id": "sess-1"}
+    )
+
+    assert result["ok"] is True
+    assert "png_base64" not in result["result"]
+    assert result["result"]["capture_path"].startswith(str(HOST_ARTIFACT_ROOT / "ctx-1"))
+    assert result["result"]["host_path"] == result["result"]["capture_path"]
+    assert result["result"]["container_path"].startswith(f"{CONTAINER_ARTIFACT_ROOT}/ctx-1/")
 
 
 async def test_move_click_scroll_key_type_normalize_payloads(
