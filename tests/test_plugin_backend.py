@@ -580,6 +580,152 @@ def test_remote_file_structure_is_injected_as_extras_not_system_prompt() -> None
     assert "pyproject.toml" in remote_tree_prompt
 
 
+def test_computer_use_remote_guidance_is_injected_as_extras_when_enabled_cli_is_available() -> None:
+    _install_fake_helpers()
+    ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")
+    _reset_ws_runtime_state(ws_runtime_mod)
+
+    class FakeLoopData:
+        def __init__(self) -> None:
+            self.system = []
+            self.extras_temporary = {}
+            self.extras_persistent = {}
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.LoopData = FakeLoopData
+    sys.modules["agent"] = agent_mod
+
+    extension_mod = types.ModuleType("helpers.extension")
+
+    class Extension:
+        def __init__(self, agent=None, **kwargs) -> None:
+            self.agent = agent
+            self.kwargs = kwargs
+
+    extension_mod.Extension = Extension
+    sys.modules["helpers.extension"] = extension_mod
+    sys.modules["helpers"].extension = extension_mod
+
+    include_mod = _reload(
+        "plugins._a0_connector.extensions.python.message_loop_prompts_after."
+        "_77_include_computer_use_remote"
+    )
+
+    sid = "sid-computer-use"
+    context_id = "ctx-computer-use"
+    ws_runtime_mod.register_sid(sid)
+    ws_runtime_mod.subscribe_sid_to_context(sid, context_id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        sid,
+        {
+            "supported": True,
+            "enabled": True,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+            "backend_id": "wayland",
+            "backend_family": "linux",
+            "features": ["inline-png-capture", "pointer-injection"],
+            "support_reason": "Wayland portal backend is available.",
+        },
+    )
+
+    class FakeContext:
+        id = context_id
+
+    class FakeAgent:
+        context = FakeContext()
+
+        def read_prompt(self, file: str, **kwargs) -> str:
+            assert file == "agent.extras.computer_use_remote.md"
+            return (
+                "COMPUTER_USE_EXTRAS\n"
+                f"{kwargs['backend']}\n"
+                f"{kwargs['trust_mode']}\n"
+                f"{kwargs['features']}\n"
+                f"{kwargs['support_reason']}"
+            )
+
+    loop_data = FakeLoopData()
+    loop_data.system.append("static system prompt")
+
+    asyncio.run(
+        include_mod.IncludeComputerUseRemote(agent=FakeAgent()).execute(loop_data=loop_data)
+    )
+
+    assert loop_data.system == ["static system prompt"]
+    assert set(loop_data.extras_temporary) == {"computer_use_remote"}
+    prompt = loop_data.extras_temporary["computer_use_remote"]
+    assert "COMPUTER_USE_EXTRAS" in prompt
+    assert "wayland/linux" in prompt
+    assert "persistent" in prompt
+    assert "inline-png-capture, pointer-injection" in prompt
+
+
+def test_computer_use_remote_guidance_is_not_injected_without_enabled_cli() -> None:
+    _install_fake_helpers()
+    ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")
+    _reset_ws_runtime_state(ws_runtime_mod)
+
+    class FakeLoopData:
+        def __init__(self) -> None:
+            self.system = []
+            self.extras_temporary = {}
+            self.extras_persistent = {}
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.LoopData = FakeLoopData
+    sys.modules["agent"] = agent_mod
+
+    extension_mod = types.ModuleType("helpers.extension")
+
+    class Extension:
+        def __init__(self, agent=None, **kwargs) -> None:
+            self.agent = agent
+            self.kwargs = kwargs
+
+    extension_mod.Extension = Extension
+    sys.modules["helpers.extension"] = extension_mod
+    sys.modules["helpers"].extension = extension_mod
+
+    include_mod = _reload(
+        "plugins._a0_connector.extensions.python.message_loop_prompts_after."
+        "_77_include_computer_use_remote"
+    )
+
+    sid = "sid-disabled"
+    context_id = "ctx-computer-use"
+    ws_runtime_mod.register_sid(sid)
+    ws_runtime_mod.subscribe_sid_to_context(sid, context_id)
+    ws_runtime_mod.store_sid_computer_use_metadata(
+        sid,
+        {
+            "supported": True,
+            "enabled": False,
+            "trust_mode": "persistent",
+            "artifact_root": "/a0/tmp/_a0_connector/computer_use",
+        },
+    )
+
+    class FakeContext:
+        id = context_id
+
+    class FakeAgent:
+        context = FakeContext()
+
+        def read_prompt(self, file: str, **kwargs) -> str:
+            raise AssertionError(f"read_prompt should not be called, got {file!r}")
+
+    loop_data = FakeLoopData()
+    loop_data.system.append("static system prompt")
+
+    asyncio.run(
+        include_mod.IncludeComputerUseRemote(agent=FakeAgent()).execute(loop_data=loop_data)
+    )
+
+    assert loop_data.system == ["static system prompt"]
+    assert loop_data.extras_temporary == {}
+
+
 def test_ws_connector_exec_result_resolves_pending_future() -> None:
     _install_fake_helpers()
     ws_runtime_mod = _reload("plugins._a0_connector.helpers.ws_runtime")

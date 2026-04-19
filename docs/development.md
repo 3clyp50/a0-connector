@@ -6,10 +6,13 @@
 a0-connector/
 ├── src/agent_zero_cli/     # CLI (Textual, httpx, python-socketio)
 ├── packages/               # Published backend package scaffolding and metadata
-├── plugin/_a0_connector/    # Builtin plugin source mirrored into Agent Zero Core plugins/_a0_connector
 ├── tests/                  # pytest
 └── docs/                   # You are here
 ```
+
+The builtin `_a0_connector` plugin is not vendored in this repository. Backend
+changes happen directly in Agent Zero Core under `plugins/_a0_connector` (or
+`/a0/plugins/_a0_connector` in Docker).
 
 ## Runtime setup options
 
@@ -22,12 +25,10 @@ a0-connector/
 
 ```bash
 cd /path/to/agent-zero
-mkdir -p plugins/_a0_connector
-rsync -a /path/to/a0-connector/plugin/_a0_connector/ plugins/_a0_connector/
 python run_ui.py --host=127.0.0.1 --port=50001
 ```
 
-This sync step is for Core development only. End users should get `_a0_connector` from Agent Zero Core as a builtin plugin.
+Edit the builtin `_a0_connector` plugin in that Agent Zero checkout directly, then restart Agent Zero. End users should get `_a0_connector` from Agent Zero Core as a builtin plugin.
 
 To test a protected instance, start Agent Zero with `AUTH_LOGIN` and `AUTH_PASSWORD` configured in its runtime `.env`.
 
@@ -44,13 +45,12 @@ When you are developing against a Docker-detected local Agent Zero instance, pre
 
 The published `a0` wheel uses environment markers to pull the matching computer-use backend automatically. Linux installs `a0-computer-use-wayland`, Windows installs `a0-computer-use-windows`, and the reserved names `a0-computer-use-x11` and `a0-computer-use-macos` are held for later releases.
 
-### Mirroring backend changes back into this repo
+### Backend source of truth
 
-If you edit an external Core/runtime copy of the plugin, mirror changes back into this repo copy before testing or committing:
-
-```bash
-rsync -a --delete /path/to/agent-zero/plugins/_a0_connector/ plugin/_a0_connector/
-```
+There is no repo-local mirror to sync. The source of truth for backend work is
+your Agent Zero Core/runtime copy of `plugins/_a0_connector`. The tests in this
+repo resolve that plugin from `A0_CONNECTOR_PLUGIN_ROOT` when set, otherwise
+from a sibling `../agent-zero/plugins/_a0_connector` checkout if present.
 
 ## Tests
 

@@ -7,7 +7,7 @@ Terminal connector for [Agent Zero](https://github.com/frdel/agent-zero). It pai
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | CLI (`a0`) | `src/agent_zero_cli/` | Terminal UI and session-aware transport client |
-| Plugin (`_a0_connector`) | `plugin/_a0_connector/` | Builtin Agent Zero Core plugin that exposes the connector HTTP + Socket.IO surface |
+| Plugin (`_a0_connector`) | Agent Zero Core `plugins/_a0_connector` | Builtin plugin that exposes the connector HTTP + Socket.IO surface |
 
 The CLI requires an Agent Zero build that includes the builtin `_a0_connector` plugin.
 
@@ -61,15 +61,10 @@ By default `a0 update` follows the stable `a0` release channel used by the insta
 
 No separate plugin install is required for users once Agent Zero Core ships `_a0_connector` as a builtin plugin.
 
-For Core development, keep this repo's mirror in sync with the builtin plugin directory and restart Agent Zero after changes:
+This repo does not contain a vendored plugin copy. For Core development, edit the builtin plugin directly in your Agent Zero checkout/runtime copy and restart Agent Zero after changes:
 
-```bash
-cd /path/to/agent-zero
-mkdir -p plugins/_a0_connector
-rsync -a /path/to/a0-connector/plugin/_a0_connector/ plugins/_a0_connector/
-```
-
-For Docker-based Agent Zero setups, the same builtin plugin path is `/a0/plugins/_a0_connector`.
+- Local Agent Zero checkout: `<agent-zero>/plugins/_a0_connector`
+- Docker-based Agent Zero runtime: `/a0/plugins/_a0_connector`
 
 ## Connect
 
