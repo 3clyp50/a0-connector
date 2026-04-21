@@ -16,6 +16,7 @@ from agent_zero_cli.client import (
     A0ConnectorPluginMissingError,
     A0WebSocketConnectionError,
     _ensure_aiohttp_ws_timeout_compat,
+    _socketio_client_kwargs,
 )
 from agent_zero_cli.config import (
     load_config,
@@ -436,6 +437,18 @@ async def test_connect_websocket_accepts_self_signed_https_connector() -> None:
             await client.disconnect()
 
 
+def test_socketio_client_disables_aiohttp_websocket_tls_verification() -> None:
+    kwargs = _socketio_client_kwargs()
+
+    assert kwargs["ssl_verify"] is False
+    assert kwargs["websocket_extra_options"] == {"ssl": False}
+
+    client = A0Client("https://example.test")
+
+    assert client.sio.eio.ssl_verify is False
+    assert client.sio.eio.websocket_extra_options == {"ssl": False}
+
+
 async def test_connect_websocket_reports_blank_namespace_rejection_after_probe() -> None:
     client = A0Client("http://127.0.0.1:50001")
     client.http = Mock()
@@ -454,6 +467,30 @@ async def test_connect_websocket_reports_blank_namespace_rejection_after_probe()
         match=r"Socket\.IO transport probe succeeded, but the /ws namespace connection was rejected\.",
     ):
         await client.connect_websocket()
+
+
+async def test_connect_websocket_reports_tls_certificate_rejection_after_probe() -> None:
+    client = A0Client("https://example.test")
+    client.http = Mock()
+    client.http.get = AsyncMock(
+        return_value=FakeResponse(
+            status_code=200,
+            text='0{"sid":"sid-1","upgrades":["websocket"],"pingInterval":25000,"pingTimeout":20000}',
+        )
+    )
+    client.sio = FakeSocketIOClient(
+        connect_exception=socketio.exceptions.ConnectionError(
+            "Cannot connect to host example.test:443 ssl:True "
+            "[SSLCertVerificationError: unable to get local issuer certificate]"
+        ),
+    )
+
+    with pytest.raises(A0WebSocketConnectionError) as exc_info:
+        await client.connect_websocket()
+
+    message = str(exc_info.value)
+    assert "TLS certificate verification" in message
+    assert "Origin/Referer" not in message
 
 
 async def test_send_message_uses_prefixed_ws_event() -> None:

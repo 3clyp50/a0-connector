@@ -43,6 +43,12 @@ _ALREADY_CONNECTED_REJECTION = "Already connected"
 # Mirror the browser/manual-URL posture: accept self-signed or privately-issued
 # certificates instead of blocking HTTPS connections outright.
 _VERIFY_TLS_CERTIFICATES = False
+_TLS_CERTIFICATE_ERROR_MARKERS = (
+    "certificate verify failed",
+    "sslcertverificationerror",
+    "unable to get local issuer certificate",
+    "self-signed certificate",
+)
 
 
 class A0ProtocolError(RuntimeError):
@@ -68,6 +74,19 @@ def _ensure_aiohttp_ws_timeout_compat() -> None:
     aiohttp.ClientWSTimeout = _client_ws_timeout_compat  # type: ignore[attr-defined]
 
 
+def _socketio_client_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "ssl_verify": _VERIFY_TLS_CERTIFICATES,
+        "reconnection": False,
+    }
+    if not _VERIFY_TLS_CERTIFICATES:
+        # Some python-engineio/aiohttp combinations still let the WebSocket
+        # upgrade fall back to aiohttp's default SSL context. Make the intent
+        # explicit for ws_connect too, not only for the Engine.IO HTTP probe.
+        kwargs["websocket_extra_options"] = {"ssl": False}
+    return kwargs
+
+
 class A0Client:
     """Client for communicating with a running Agent Zero instance."""
 
@@ -78,10 +97,7 @@ class A0Client:
             timeout=httpx.Timeout(10.0),
             verify=_VERIFY_TLS_CERTIFICATES,
         )
-        self.sio = socketio.AsyncClient(
-            ssl_verify=_VERIFY_TLS_CERTIFICATES,
-            reconnection=False,
-        )
+        self.sio = socketio.AsyncClient(**_socketio_client_kwargs())
         self.connected = False
         self._events_registered = False
         self._last_connect_error: Any = None
@@ -275,6 +291,15 @@ class A0Client:
                 "Socket.IO could not start a clean connector session because the previous "
                 "transport still appeared connected. Retry will reset the transport before "
                 "opening a fresh /ws session."
+            )
+
+        reason_lower = reason.lower()
+        if any(marker in reason_lower for marker in _TLS_CERTIFICATE_ERROR_MARKERS):
+            return (
+                f"Socket.IO transport probe succeeded, but the {WS_NAMESPACE} namespace "
+                f"connection failed TLS certificate verification: {reason}. Update the CLI so "
+                "its Socket.IO transport uses the connector TLS settings, or fix the server "
+                "certificate chain if strict verification is enabled."
             )
 
         guidance = (
