@@ -78,6 +78,91 @@ def test_remote_file_utility_roundtrips_read_write_and_patch(tmp_path: Path) -> 
     assert target.read_text(encoding="utf-8") == "line-1\nline-2-updated\n"
 
 
+def test_remote_file_utility_context_patch_chains_after_line_shift(tmp_path: Path) -> None:
+    utility = RemoteFileUtility(scan_root=str(tmp_path))
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    first_patch = utility.handle_file_op(
+        {
+            "op_id": "op-context-patch-1",
+            "op": "patch",
+            "path": str(target),
+            "patch_text": (
+                "*** Begin Patch\n"
+                "*** Update File: sample.txt\n"
+                "@@ alpha\n"
+                "+inserted\n"
+                "*** End Patch"
+            ),
+        }
+    )
+    second_patch = utility.handle_file_op(
+        {
+            "op_id": "op-context-patch-2",
+            "op": "patch",
+            "path": str(target),
+            "patch_text": (
+                "*** Begin Patch\n"
+                "*** Update File: sample.txt\n"
+                " beta\n"
+                "-gamma\n"
+                "+gamma-updated\n"
+                "*** End Patch"
+            ),
+        }
+    )
+
+    assert first_patch["ok"] is True
+    assert first_patch["result"]["file"]["total_lines"] == 4
+    assert second_patch["ok"] is True
+    assert second_patch["result"]["file"]["total_lines"] == 4
+    assert target.read_text(encoding="utf-8") == "alpha\ninserted\nbeta\ngamma-updated\n"
+
+
+def test_remote_file_utility_context_patch_can_replace_anchor_line(tmp_path: Path) -> None:
+    utility = RemoteFileUtility(scan_root=str(tmp_path))
+    target = tmp_path / "sample.py"
+    target.write_text(
+        (
+            "def main():\n"
+            "    print(greet(\"Agent Zero\"))\n"
+            "\n"
+            "\n"
+            "if __name__ == \"__main__\":\n"
+            "    main()\n"
+        ),
+        encoding="utf-8",
+    )
+
+    patch = utility.handle_file_op(
+        {
+            "op_id": "op-context-patch-anchor-line",
+            "op": "patch",
+            "path": str(target),
+            "patch_text": (
+                "*** Begin Patch\n"
+                "*** Update File: sample.py\n"
+                "@@     print(greet(\"Agent Zero\"))\n"
+                "-    print(greet(\"Agent Zero\"))\n"
+                "+    print(greet(\"Agent Zero\").upper())\n"
+                "*** End Patch"
+            ),
+        }
+    )
+
+    assert patch["ok"] is True
+    assert patch["result"]["file"]["total_lines"] == 6
+    assert target.read_text(encoding="utf-8") == (
+        "def main():\n"
+        "    print(greet(\"Agent Zero\").upper())\n"
+        "\n"
+        "\n"
+        "if __name__ == \"__main__\":\n"
+        "    main()\n"
+    )
+
+
 def test_remote_file_utility_blocks_writes_and_bounds_tree_snapshots(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text("a\n", encoding="utf-8")

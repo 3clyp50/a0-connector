@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 from typing import Any, Iterable
 
+from agent_zero_cli.context_patch import apply_context_patch
+
 
 _DEFAULT_IGNORE_PATTERNS = (
     ".git/",
@@ -188,6 +190,9 @@ class RemoteFileUtility:
         }
 
     def _file_op_patch(self, op_id: str, path: str, data: dict[str, Any]) -> dict[str, Any]:
+        if data.get("patch_text") is not None:
+            return self._file_op_context_patch(op_id, path, data)
+
         edits = data.get("edits", [])
         if not isinstance(edits, list) or not edits:
             return {"op_id": op_id, "ok": False, "error": "edits must be a non-empty list"}
@@ -223,6 +228,40 @@ class RemoteFileUtility:
             handle.writelines(lines)
         file_meta = self._file_metadata(target_path, total_lines=len(lines))
 
+        return {
+            "op_id": op_id,
+            "ok": True,
+            "result": {
+                "path": path,
+                "message": f"{path} patched successfully",
+                "file": file_meta,
+            },
+        }
+
+    def _file_op_context_patch(self, op_id: str, path: str, data: dict[str, Any]) -> dict[str, Any]:
+        if data.get("edits") is not None:
+            return {
+                "op_id": op_id,
+                "ok": False,
+                "error": "provide either edits or patch_text, not both",
+            }
+
+        patch_text = str(data.get("patch_text", ""))
+        target_path = self._expand_file_path(path)
+        if not os.path.isfile(target_path):
+            return {"op_id": op_id, "ok": False, "error": f"File not found: {path}"}
+
+        with open(target_path, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+
+        new_content = apply_context_patch(content, patch_text)
+        with open(target_path, "w", encoding="utf-8") as handle:
+            handle.write(new_content)
+
+        file_meta = self._file_metadata(
+            target_path,
+            total_lines=self._count_content_lines(new_content),
+        )
         return {
             "op_id": op_id,
             "ok": True,

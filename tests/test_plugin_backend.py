@@ -1712,6 +1712,58 @@ def test_text_editor_remote_patch_requires_prior_read(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "line-1\nline-2\n"
 
 
+def test_text_editor_remote_context_patch_does_not_require_prior_read(tmp_path: Path) -> None:
+    target = tmp_path / "sample.txt"
+    target.write_text("line-1\nline-2\nline-3\n", encoding="utf-8")
+    utility = RemoteFileUtility(scan_root=str(tmp_path))
+
+    shared_ws_manager, ws_runtime_mod, tool_mod = _load_text_editor_remote_tool(
+        file_op_handler=utility.handle_file_op
+    )
+    agent = _FakeRemoteAgent()
+    ws_runtime_mod.register_sid("sid-cli")
+    ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
+
+    first_patch = asyncio.run(
+        _create_text_editor_remote(
+            tool_mod,
+            agent,
+            op="patch",
+            path=str(target),
+            patch_text=(
+                "*** Begin Patch\n"
+                "*** Update File: sample.txt\n"
+                "@@ line-1\n"
+                "+inserted\n"
+                "*** End Patch"
+            ),
+        ).execute()
+    )
+    second_patch = asyncio.run(
+        _create_text_editor_remote(
+            tool_mod,
+            agent,
+            op="patch",
+            path=str(target),
+            patch_text=(
+                "*** Begin Patch\n"
+                "*** Update File: sample.txt\n"
+                " line-2\n"
+                "-line-3\n"
+                "+line-3-updated\n"
+                "*** End Patch"
+            ),
+        ).execute()
+    )
+
+    assert first_patch.message == f"{target} patched successfully"
+    assert second_patch.message == f"{target} patched successfully"
+    assert shared_ws_manager.ops == ["patch", "patch"]
+    assert target.read_text(encoding="utf-8") == (
+        "line-1\ninserted\nline-2\nline-3-updated\n"
+    )
+
+
 def test_text_editor_remote_patch_detects_stale_remote_reads(tmp_path: Path) -> None:
     target = tmp_path / "sample.txt"
     target.write_text("line-1\nline-2\n", encoding="utf-8")
