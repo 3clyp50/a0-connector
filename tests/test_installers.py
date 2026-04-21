@@ -43,6 +43,7 @@ def test_windows_installer_pins_managed_python() -> None:
 def test_root_package_declares_platform_backend_dependencies() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'a0-computer-use-wayland>=1.5; platform_system == "Linux"' in pyproject
+    assert 'a0-computer-use-x11>=1.5; platform_system == "Linux"' in pyproject
     assert 'a0-computer-use-macos>=1.5; platform_system == "Darwin"' in pyproject
     assert 'a0-computer-use-windows>=1.5; platform_system == "Windows"' in pyproject
 
@@ -52,11 +53,12 @@ def test_development_docs_show_workspace_backend_editable_installs() -> None:
     compact = " ".join(development.split())
     assert "pip install -e .\\packages\\a0-computer-use-windows -e ." in development
     assert "pip install -e ./packages/a0-computer-use-wayland -e ." in development
+    assert "pip install -e ./packages/a0-computer-use-x11 -e ." in development
     assert "pip install -e ./packages/a0-computer-use-macos -e ." in development
     assert "Repo-local editable installs need the matching backend package" in compact
 
 
-def test_backend_package_scaffolding_reserves_release_names() -> None:
+def test_backend_packages_keep_release_names_and_modules() -> None:
     package_names = {
         "a0-computer-use-wayland": "a0_computer_use_wayland",
         "a0-computer-use-windows": "a0_computer_use_windows",
@@ -78,6 +80,7 @@ def test_readme_documents_uv_managed_python_and_git_install() -> None:
     assert "raw.githubusercontent.com/agent0ai/a0-connector/main/install.ps1" in compact
     assert "install the stable `a0` release directly" in compact
     assert "a0-computer-use-wayland" in compact
+    assert "a0-computer-use-x11" in compact
     assert "a0-computer-use-windows" in compact
     assert "managed CPython 3.11 tool environment" in compact
     assert "download it automatically" in compact

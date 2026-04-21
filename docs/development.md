@@ -5,7 +5,7 @@
 ```
 a0-connector/
 ├── src/agent_zero_cli/     # CLI (Textual, httpx, python-socketio)
-├── packages/               # Published backend package scaffolding and metadata
+├── packages/               # Published backend packages and metadata
 ├── tests/                  # pytest
 └── docs/                   # You are here
 ```
@@ -58,6 +58,15 @@ export AGENT_ZERO_HOST=http://localhost:50001
 a0
 ```
 
+Linux / X11:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ./packages/a0-computer-use-x11 -e .
+export AGENT_ZERO_HOST=http://localhost:50001
+a0
+```
+
 macOS:
 
 ```bash
@@ -69,7 +78,7 @@ a0
 
 When you are developing against a Docker-detected local Agent Zero instance, prefer `localhost` over `127.0.0.1` so the saved host matches the discovered host exactly.
 
-The published `a0` wheel uses environment markers to pull the matching computer-use backend automatically. Linux installs `a0-computer-use-wayland`, macOS installs `a0-computer-use-macos`, Windows installs `a0-computer-use-windows`, and `a0-computer-use-x11` remains reserved for a future X11-specific backend.
+The published `a0` wheel uses environment markers to pull the matching computer-use backend automatically. Linux installs both `a0-computer-use-wayland` and `a0-computer-use-x11`; the backend resolver picks Wayland for Wayland sessions and X11 for Xorg/X11 sessions. macOS installs `a0-computer-use-macos`, and Windows installs `a0-computer-use-windows`.
 
 The standalone installers and `a0 update` default to a managed CPython 3.11
 runtime via `uv`, so end users do not need a preinstalled Python 3.10+ on the

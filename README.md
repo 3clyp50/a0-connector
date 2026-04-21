@@ -31,7 +31,7 @@ irm https://raw.githubusercontent.com/agent0ai/a0-connector/main/install.ps1 | i
 a0
 ```
 
-The `a0` release pulls in the matching computer-use backend automatically: `a0-computer-use-wayland` on Linux, `a0-computer-use-macos` on macOS, and `a0-computer-use-windows` on Windows. The `a0-computer-use-x11` name remains reserved for a future X11-specific backend.
+The `a0` release pulls in the matching computer-use backend automatically: `a0-computer-use-wayland` and `a0-computer-use-x11` on Linux, `a0-computer-use-macos` on macOS, and `a0-computer-use-windows` on Windows. Linux backend selection is automatic: Wayland sessions use the portal backend, while Xorg/X11 sessions use the X11 backend.
 
 ## Manual install
 
