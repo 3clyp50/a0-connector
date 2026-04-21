@@ -28,6 +28,12 @@ def _normalize_text(value: object) -> str:
 
 
 def _parse_timestamp(value: object) -> datetime | None:
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (OverflowError, OSError, ValueError):
+            return None
+
     raw = _normalize_text(value)
     if not raw:
         return None
@@ -85,14 +91,21 @@ def _build_entry(context: Mapping[str, object], index: int, *, now: datetime | N
     context_id = _normalize_text(context.get("id"))
     raw_name = _normalize_text(context.get("name"))
     created_at = context.get("created_at")
+    updated_at = context.get("updated_at")
     preview = _normalize_preview(context.get("last_message"), created_at=created_at)
     title = raw_name or f"Chat {index}"
     generated_name = _looks_generated_name(raw_name)
 
+    parsed_created_at = _parse_timestamp(created_at)
+    parsed_updated_at = _parse_timestamp(updated_at)
+
     if generated_name:
         title = f"Chat {index}"
 
-    meta_bits = [f"Started {_format_timestamp(_parse_timestamp(created_at), now=now)}"]
+    meta_bits = [f"Started {_format_timestamp(parsed_created_at, now=now)}"]
+    if parsed_updated_at and parsed_updated_at != parsed_created_at:
+        meta_bits.append(f"Updated {_format_timestamp(parsed_updated_at, now=now)}")
+
     if context.get("running"):
         meta_bits.append("Running now")
     if generated_name:

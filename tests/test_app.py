@@ -8,7 +8,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.selection import SELECT_ALL
 
-from agent_zero_cli import connection
+from agent_zero_cli import chat_commands, connection
 from agent_zero_cli.app import AgentZeroCLI
 from agent_zero_cli.client import DEFAULT_HOST
 from agent_zero_cli.config import CLIConfig
@@ -670,6 +670,49 @@ async def test_profile_command_with_argument_sets_profile(
 
     assert calls == [{"agent_profile": "developer"}]
     assert notices == [("Agent profile set to Developer.", False)]
+
+
+async def test_chat_list_command_supports_project_filter_and_sort_flags(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.connected = True
+    dummy_app.connector_features = {"chats_list"}
+
+    parsed: list[tuple[str, bool]] = []
+
+    async def fake_cmd_chats(
+        _app: DummyAgentZeroCLI,
+        *,
+        sort_by: str = "updated",
+        active_project_only: bool = False,
+    ) -> None:
+        parsed.append((sort_by, active_project_only))
+
+    monkeypatch.setattr(chat_commands, "cmd_chats", fake_cmd_chats)
+
+    await dummy_app._dispatch_command("/chats --project --sort=name")
+
+    assert parsed == [("name", True)]
+
+
+async def test_chat_list_command_rejects_unknown_flags(
+    dummy_app: DummyAgentZeroCLI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_app.connected = True
+    dummy_app.connector_features = {"chats_list"}
+
+    notices: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        dummy_app,
+        "_show_notice",
+        lambda message, *, error=False: notices.append((message, error)),
+    )
+
+    await dummy_app._dispatch_command("/chats --bogus")
+
+    assert notices == [("Usage: /chats [--project|--all-projects] [--sort=updated|created|name]", True)]
 
 
 async def test_remote_safety_toggles_update_local_permissions(

@@ -276,7 +276,7 @@ class AgentZeroCLI(App):
             CommandSpec(
                 "/chats",
                 (),
-                "List previous chats and switch contexts.",
+                "List previous chats (default sorted by last updated). Use --project to filter by active project.",
                 lambda app: availability.require_features(app, "chats_list"),
                 lambda app: chat_commands.cmd_chats(app),
             ),
@@ -1046,8 +1046,72 @@ class AgentZeroCLI(App):
             self._sync_ready_actions()
             return
 
+        if token == "/chats":
+            parsed = self._parse_chats_command(text)
+            if parsed is None:
+                self._show_notice(
+                    "Usage: /chats [--project|--all-projects] [--sort=updated|created|name]",
+                    error=True,
+                )
+                return
+
+            sort_by, active_project_only = parsed
+            await chat_commands.cmd_chats(
+                self,
+                sort_by=sort_by,
+                active_project_only=active_project_only,
+            )
+            self._sync_ready_actions()
+            return
+
         await spec.handler(self)
         self._sync_ready_actions()
+
+    def _parse_chats_command(self, text: str) -> tuple[str, bool] | None:
+        sort_by = "updated"
+        active_project_only = False
+
+        tokens = text.split()[1:]
+        index = 0
+        while index < len(tokens):
+            token = tokens[index].lower()
+
+            if token in {"--project", "--active-project", "-p"}:
+                active_project_only = True
+                index += 1
+                continue
+
+            if token in {"--all-projects", "--all", "-a"}:
+                active_project_only = False
+                index += 1
+                continue
+
+            if token.startswith("--sort="):
+                value = token.split("=", maxsplit=1)[1]
+                if value not in {"updated", "created", "name"}:
+                    return None
+                sort_by = value
+                index += 1
+                continue
+
+            if token in {"--sort", "-s"}:
+                if index + 1 >= len(tokens):
+                    return None
+                value = tokens[index + 1].lower()
+                if value not in {"updated", "created", "name"}:
+                    return None
+                sort_by = value
+                index += 2
+                continue
+
+            if token in {"updated", "created", "name"}:
+                sort_by = token
+                index += 1
+                continue
+
+            return None
+
+        return sort_by, active_project_only
 
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         raw_text = event.value
