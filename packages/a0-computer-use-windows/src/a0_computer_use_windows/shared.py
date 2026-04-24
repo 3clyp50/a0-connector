@@ -10,9 +10,12 @@ WINDOWS_BACKEND_PRIORITY = 100
 WINDOWS_BACKEND_FEATURES = (
     "inline-png-capture",
     "dxcam-screen-capture",
+    "normalized-screen-coordinates",
+    "global-pixel-actions",
     "uia-automation",
     "mouse-injection",
     "keyboard-injection",
+    "real-cursor-may-move",
     "session-reuse-metadata",
 )
 WINDOWS_TRUST_MODES = ("interactive", "persistent", "free_run")

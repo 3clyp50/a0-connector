@@ -27,6 +27,8 @@ def test_macos_backend_spec_exposes_expected_metadata() -> None:
     assert spec.supports_trust_mode("free_run") is True
     assert "inline-png-capture" in spec.features
     assert "quartz-input-events" in spec.features
+    assert "global-pixel-actions" in spec.features
+    assert "real-cursor-may-move" in spec.features
 
 
 def test_macos_detection_and_support_reason_are_additive_and_explicit(

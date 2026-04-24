@@ -84,6 +84,9 @@ def test_x11_backend_spec_exposes_expected_metadata() -> None:
     assert spec.supports_trust_mode("free_run") is True
     assert "x11-xtest" in spec.features
     assert "inline-png-capture" in spec.features
+    assert "global-pixel-actions" in spec.features
+    assert "real-cursor-may-move" in spec.features
+    assert "focus-risk" in spec.features
 
 
 def test_x11_detection_and_support_reason_are_explicit(monkeypatch: pytest.MonkeyPatch) -> None:

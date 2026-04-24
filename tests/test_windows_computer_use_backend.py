@@ -70,6 +70,8 @@ def test_windows_backend_spec_exports_expected_metadata() -> None:
     assert spec.supports_trust_mode("free_run") is True
     assert "inline-png-capture" in spec.features
     assert "uia-automation" in spec.features
+    assert "global-pixel-actions" in spec.features
+    assert "real-cursor-may-move" in spec.features
 
 
 def test_windows_backend_wrapper_uses_current_python() -> None:

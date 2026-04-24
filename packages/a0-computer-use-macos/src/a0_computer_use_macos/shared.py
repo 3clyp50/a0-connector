@@ -10,7 +10,12 @@ MACOS_BACKEND_PRIORITY = 100
 MACOS_BACKEND_FEATURES = (
     "inline-png-capture",
     "screencapture-screen-capture",
+    "normalized-screen-coordinates",
+    "global-pixel-actions",
     "quartz-input-events",
+    "pointer-injection",
+    "keyboard-injection",
+    "real-cursor-may-move",
     "accessibility-trust",
     "session-reuse-metadata",
 )

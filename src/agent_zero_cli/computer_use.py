@@ -45,6 +45,9 @@ _SUPPORTED_ACTIONS = {
     "stop_session",
 }
 _SUPPORTED_TRUST_MODES = {"interactive", "persistent", "free_run"}
+_MUTATING_ACTIONS = {"move", "click", "scroll", "key", "type"}
+_DEFAULT_FRESH_CAPTURE_TIMEOUT_SECONDS = 0.45
+_CAPTURE_COORDINATE_SPACE = "normalized_global_screen"
 _DISABLED_ERROR = "COMPUTER_USE_DISABLED"
 _REARM_REQUIRED_ERROR = "COMPUTER_USE_REARM_REQUIRED"
 _SESSION_REQUIRED_ERROR = "COMPUTER_USE_SESSION_REQUIRED"
@@ -221,6 +224,15 @@ def _coerce_int(value: object, *, name: str, default: int | None = None) -> int:
         raise ValueError(f"{name} must be an integer") from exc
 
 
+def _coerce_float(value: object, *, name: str, default: float | None = None) -> float:
+    if value is None and default is not None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
 def _coerce_bool(value: object, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -278,6 +290,7 @@ class _HelperSession:
     status: str = "idle"
     last_result: dict[str, Any] = field(default_factory=dict)
     session_result: dict[str, Any] = field(default_factory=dict)
+    last_action_completed_at: float = 0.0
 
 
 class ComputerUseManager:
@@ -486,6 +499,15 @@ class ComputerUseManager:
             request["session_id"] = session_id
 
         if action == "capture":
+            if _coerce_bool(payload.get("fresh")):
+                request["fresh"] = True
+            if payload.get("fresh_after") is not None:
+                request["fresh_after"] = _coerce_float(payload.get("fresh_after"), name="fresh_after")
+            if payload.get("fresh_timeout_seconds") is not None:
+                request["fresh_timeout_seconds"] = max(
+                    0.0,
+                    _coerce_float(payload.get("fresh_timeout_seconds"), name="fresh_timeout_seconds"),
+                )
             return request
 
         if action == "move":
@@ -744,6 +766,13 @@ class ComputerUseManager:
             self._prune_capture_artifacts()
             capture_host_path, capture_container_path = self._next_capture_paths(session.context_id)
             helper_request["capture_path"] = capture_host_path
+            if _coerce_bool(helper_request.get("fresh")):
+                if session.last_action_completed_at > 0:
+                    helper_request.setdefault("fresh_after", session.last_action_completed_at)
+                helper_request.setdefault(
+                    "fresh_timeout_seconds",
+                    _DEFAULT_FRESH_CAPTURE_TIMEOUT_SECONDS,
+                )
 
         response = await self._helper_request(session, helper_request)
         if action_name == "capture" and not bool(response.get("ok")):
@@ -753,8 +782,26 @@ class ComputerUseManager:
             if capture_host_path:
                 result_dict.setdefault("host_path", capture_host_path)
                 result_dict.setdefault("capture_path", capture_host_path)
+                result_dict.setdefault("capture_id", Path(capture_host_path).stem)
             if capture_container_path:
                 result_dict.setdefault("container_path", capture_container_path)
+            result_dict.setdefault("captured_at", time.time())
+            result_dict.setdefault("coordinate_space", _CAPTURE_COORDINATE_SPACE)
+            result_dict.setdefault("coordinate_origin", "top_left")
+            result_dict.setdefault("coordinate_range", [0.0, 1.0])
+            if _coerce_bool(helper_request.get("fresh")):
+                result_dict.setdefault("fresh", True)
+                fresh_after = helper_request.get("fresh_after")
+                if fresh_after is not None:
+                    result_dict.setdefault("fresh_after", fresh_after)
+                    frame_captured_at = result_dict.get("frame_captured_at")
+                    try:
+                        frame_time = float(frame_captured_at)
+                        requested_time = float(fresh_after)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        result_dict.setdefault("fresh_after_satisfied", frame_time >= requested_time)
             response = {
                 **response,
                 "result": result_dict,
@@ -898,6 +945,8 @@ class ComputerUseManager:
                 session.status = "active" if session.active else "idle"
             elif action == "stop_session":
                 session.status = "stopped"
+            if action_name in _MUTATING_ACTIONS or action_name == "start_session":
+                session.last_action_completed_at = time.time()
             if action == "start_session":
                 session.session_result = dict(result_dict)
             elif action == "stop_session":

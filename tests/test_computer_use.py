@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -450,6 +451,10 @@ async def test_capture_requests_shared_artifact_path_and_adds_container_path(
         str(computer_use_mod.HOST_ARTIFACT_ROOT / "ctx-1")
     )
     assert result["result"]["host_path"] == result["result"]["capture_path"]
+    assert result["result"]["capture_id"] == Path(str(result["result"]["capture_path"])).stem
+    assert result["result"]["coordinate_space"] == "normalized_global_screen"
+    assert result["result"]["coordinate_origin"] == "top_left"
+    assert result["result"]["coordinate_range"] == [0.0, 1.0]
     assert result["result"]["container_path"].startswith(
         f"{computer_use_mod.CONTAINER_ARTIFACT_ROOT}/ctx-1/"
     )
@@ -681,6 +686,11 @@ async def test_move_click_scroll_key_type_normalize_payloads(
     scroll = manager._normalize_action_payload("scroll", {"dx": 1, "dy": -2}, context_id="ctx-1")
     key = manager._normalize_action_payload("key", {"key": "ctrl+alt+t"}, context_id="ctx-1")
     typed = manager._normalize_action_payload("type", {"text": "hello"}, context_id="ctx-1")
+    capture = manager._normalize_action_payload(
+        "capture",
+        {"fresh": True, "fresh_after": 123.5, "fresh_timeout_seconds": 0.25},
+        context_id="ctx-1",
+    )
     submitted = manager._normalize_action_payload(
         "type",
         {"text": "hello", "submit": True},
@@ -692,6 +702,9 @@ async def test_move_click_scroll_key_type_normalize_payloads(
     assert scroll["dx"] == 1 and scroll["dy"] == -2
     assert key["keys"] == ["ctrl", "alt", "t"]
     assert typed["text"] == "hello"
+    assert capture["fresh"] is True
+    assert capture["fresh_after"] == 123.5
+    assert capture["fresh_timeout_seconds"] == 0.25
     assert submitted["submit"] is True
 
 
@@ -704,6 +717,68 @@ async def test_normalized_coordinates_are_clamped_to_unit_interval(
 
     assert move["x"] == 0.0
     assert move["y"] == 1.0
+
+
+async def test_fresh_capture_uses_recent_action_completion_time(
+    _temp_env: Path,
+) -> None:
+    manager = _manager(enabled=True, trust_mode="persistent")
+    session = _HelperSession(context_id="ctx-1", session_id="sess-1", active=True)
+    manager._sessions["ctx-1"] = session
+    requests: list[dict[str, object]] = []
+
+    async def helper_request(_session: _HelperSession, request: dict[str, object]) -> dict[str, object]:
+        requests.append(dict(request))
+        if request["action"] == "click":
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "sess-1",
+                    "button": "left",
+                    "count": 1,
+                },
+            }
+        return {
+            "ok": True,
+            "result": {
+                "session_id": "sess-1",
+                "capture_path": str(_temp_env.parent / "fresh.png"),
+                "frame_captured_at": time.time(),
+                "width": 1,
+                "height": 1,
+            },
+        }
+
+    manager._helper_request = helper_request  # type: ignore[method-assign]
+
+    clicked = await manager.handle_op(
+        {
+            "op_id": "click-1",
+            "action": "click",
+            "context_id": "ctx-1",
+            "session_id": "sess-1",
+        }
+    )
+    captured = await manager.handle_op(
+        {
+            "op_id": "cap-1",
+            "action": "capture",
+            "context_id": "ctx-1",
+            "session_id": "sess-1",
+            "fresh": True,
+        }
+    )
+
+    assert clicked["ok"] is True
+    assert captured["ok"] is True
+    assert requests[-1]["action"] == "capture"
+    assert requests[-1]["fresh"] is True
+    assert requests[-1]["fresh_after"] == session.last_action_completed_at
+    assert requests[-1]["fresh_timeout_seconds"] == computer_use_mod._DEFAULT_FRESH_CAPTURE_TIMEOUT_SECONDS
+    assert captured["result"]["fresh"] is True
+    assert captured["result"]["fresh_after"] == session.last_action_completed_at
+    assert captured["result"]["fresh_after_satisfied"] is True
+    assert captured["result"]["capture_id"] == Path(str(captured["result"]["host_path"])).stem
 
 
 async def test_disconnect_closes_active_sessions_and_resets_status(

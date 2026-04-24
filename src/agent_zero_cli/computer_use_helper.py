@@ -153,6 +153,13 @@ def _python_value(value: Any) -> Any:
     return value
 
 
+def _float_param(value: object, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class CaptureStream:
     def __init__(self, pipewire_fd: int, stream_id: int) -> None:
         self._pipewire_fd = pipewire_fd
@@ -177,17 +184,36 @@ class CaptureStream:
         except OSError:
             pass
 
-    def capture_png(self, output_path: str | None = None, *, timeout: float = 5.0) -> dict[str, Any]:
+    def capture_png(
+        self,
+        output_path: str | None = None,
+        *,
+        timeout: float = 5.0,
+        fresh_after: float = 0.0,
+        fresh_timeout: float = 0.0,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + max(timeout, 0.1)
+        fresh_deadline = time.monotonic() + max(fresh_timeout, 0.0)
         with self._sample_lock:
             while not self._sample_bytes and time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 self._sample_lock.wait(timeout=max(remaining, 0.05))
             if not self._sample_bytes:
                 raise PortalError("COMPUTER_USE_CAPTURE_UNAVAILABLE", "No screen frame is available yet.")
+
+            while (
+                fresh_after > 0
+                and fresh_timeout > 0
+                and self._sample_time < fresh_after
+                and time.monotonic() < fresh_deadline
+            ):
+                remaining = fresh_deadline - time.monotonic()
+                self._sample_lock.wait(timeout=max(remaining, 0.01))
+
             data = self._sample_bytes
             width = self._sample_width
             height = self._sample_height
+            frame_time = self._sample_time
 
         image = Image.frombytes("RGBA", (width, height), data)
         buffer = io.BytesIO()
@@ -197,6 +223,7 @@ class CaptureStream:
             "width": width,
             "height": height,
             "captured_at": time.time(),
+            "frame_captured_at": frame_time,
         }
         if output_path:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -354,7 +381,11 @@ class PortalComputerUseHelper:
     def capture(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params)
         capture_path = str(params.get("capture_path") or "").strip()
-        result = session.capture_stream.capture_png(capture_path or None)
+        result = session.capture_stream.capture_png(
+            capture_path or None,
+            fresh_after=_float_param(params.get("fresh_after"), default=0.0),
+            fresh_timeout=_float_param(params.get("fresh_timeout_seconds"), default=0.0),
+        )
         result["stream_id"] = session.stream_id
         result["session_id"] = session.session_id
         return result

@@ -408,6 +408,32 @@ def _create_computer_use_remote(
     return tool_mod.ComputerUseRemote(agent=agent, args=args)
 
 
+async def _no_sleep(_delay: float) -> None:
+    return None
+
+
+def _assert_fresh_auto_capture(tool_mod, payload: dict[str, object]) -> None:
+    assert payload["action"] == "capture"
+    assert payload["fresh"] is True
+    assert payload["fresh_timeout_seconds"] == tool_mod._FRESH_CAPTURE_TIMEOUT
+
+
+def _expected_capture_summary(
+    capture_id: str = "capture",
+    *,
+    fresh: bool = False,
+    fresh_confirmed: bool = True,
+) -> str:
+    summary = (
+        f"Computer-use capture id={capture_id} 1x1, "
+        "coordinates=normalized_global_screen [0,1]."
+    )
+    if fresh:
+        state = "confirmed" if fresh_confirmed else "not confirmed"
+        summary = f"{summary} Fresh frame {state}."
+    return summary
+
+
 def test_capabilities_advertise_current_ws_contract() -> None:
     _install_fake_helpers()
     _reload("plugins._a0_connector.api.v1.base")
@@ -1489,11 +1515,12 @@ def test_computer_use_remote_capture_records_shared_path_image_message(tmp_path:
         _create_computer_use_remote(tool_mod, agent, action="capture", session_id="sess-1").execute()
     )
 
-    assert response.message == "Current screen attached."
+    assert response.message == f"Current screen attached: {_expected_capture_summary()}"
     assert shared_ws_manager.calls[0]["payload"]["action"] == "capture"
     assert len(agent.history_messages) == 1
     raw_message = agent.history_messages[0]["content"]
-    assert raw_message["preview"] == "Computer-use capture 1x1."
+    assert raw_message["preview"] == _expected_capture_summary()
+    assert raw_message["raw_content"][0]["text"] == _expected_capture_summary()
     assert raw_message["raw_content"][1]["type"] == "image_url"
     assert raw_message["raw_content"][1]["image_url"]["url"] == str(image_path)
 
@@ -1536,14 +1563,17 @@ def test_computer_use_remote_capture_uses_shared_png_path(
         _create_computer_use_remote(tool_mod, agent, action="capture", session_id="sess-1").execute()
     )
 
-    assert response.message == "Current screen attached."
+    assert response.message == f"Current screen attached: {_expected_capture_summary()}"
     assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["capture"]
     assert len(agent.history_messages) == 1
     raw_message = agent.history_messages[0]["content"]
     assert raw_message["raw_content"][1]["image_url"]["url"] == str(image_path)
 
 
-def test_computer_use_remote_start_session_auto_refreshes_screen(tmp_path: Path) -> None:
+def test_computer_use_remote_start_session_auto_refreshes_screen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     image_path = _write_png_fixture(tmp_path)
 
     def handler(payload: dict[str, object]) -> dict[str, object]:
@@ -1565,6 +1595,8 @@ def test_computer_use_remote_start_session_auto_refreshes_screen(tmp_path: Path)
                 "status": "active",
                 "session_id": "sess-1",
                 "host_path": str(image_path),
+                "fresh": bool(payload.get("fresh")),
+                "fresh_after_satisfied": True,
                 "width": 1,
                 "height": 1,
             },
@@ -1573,6 +1605,7 @@ def test_computer_use_remote_start_session_auto_refreshes_screen(tmp_path: Path)
     shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
         computer_use_handler=handler
     )
+    monkeypatch.setattr(tool_mod.asyncio, "sleep", _no_sleep)
     agent = _FakeRemoteAgent()
     ws_runtime_mod.register_sid("sid-cli")
     ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
@@ -1590,12 +1623,19 @@ def test_computer_use_remote_start_session_auto_refreshes_screen(tmp_path: Path)
         _create_computer_use_remote(tool_mod, agent, action="start_session").execute()
     )
 
-    assert response.message == "Computer-use session started: session_id=sess-1 size=1x1 Latest screen attached."
+    assert response.message == (
+        "Computer-use session started: session_id=sess-1 size=1x1 "
+        f"Latest screen attached: {_expected_capture_summary(fresh=True)}"
+    )
     assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["start_session", "capture"]
+    _assert_fresh_auto_capture(tool_mod, shared_ws_manager.calls[1]["payload"])
     assert len(agent.history_messages) == 1
 
 
-def test_computer_use_remote_click_auto_refreshes_screen(tmp_path: Path) -> None:
+def test_computer_use_remote_click_auto_refreshes_screen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     image_path = _write_png_fixture(tmp_path)
 
     def handler(payload: dict[str, object]) -> dict[str, object]:
@@ -1616,6 +1656,8 @@ def test_computer_use_remote_click_auto_refreshes_screen(tmp_path: Path) -> None
                 "status": "active",
                 "session_id": "sess-1",
                 "host_path": str(image_path),
+                "fresh": bool(payload.get("fresh")),
+                "fresh_after_satisfied": True,
                 "width": 1,
                 "height": 1,
             },
@@ -1624,6 +1666,7 @@ def test_computer_use_remote_click_auto_refreshes_screen(tmp_path: Path) -> None
     shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
         computer_use_handler=handler
     )
+    monkeypatch.setattr(tool_mod.asyncio, "sleep", _no_sleep)
     agent = _FakeRemoteAgent()
     ws_runtime_mod.register_sid("sid-cli")
     ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
@@ -1641,12 +1684,18 @@ def test_computer_use_remote_click_auto_refreshes_screen(tmp_path: Path) -> None
         _create_computer_use_remote(tool_mod, agent, action="click", session_id="sess-1").execute()
     )
 
-    assert response.message == "Clicked left button 1 time(s). Latest screen attached."
+    assert response.message == (
+        f"Clicked left button 1 time(s). Latest screen attached: {_expected_capture_summary(fresh=True)}"
+    )
     assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["click", "capture"]
+    _assert_fresh_auto_capture(tool_mod, shared_ws_manager.calls[1]["payload"])
     assert len(agent.history_messages) == 1
 
 
-def test_computer_use_remote_type_submit_sends_submit_flag_and_auto_refreshes_screen(tmp_path: Path) -> None:
+def test_computer_use_remote_type_submit_sends_submit_flag_and_auto_refreshes_screen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     image_path = _write_png_fixture(tmp_path)
 
     def handler(payload: dict[str, object]) -> dict[str, object]:
@@ -1667,6 +1716,8 @@ def test_computer_use_remote_type_submit_sends_submit_flag_and_auto_refreshes_sc
                 "status": "active",
                 "session_id": "sess-1",
                 "host_path": str(image_path),
+                "fresh": bool(payload.get("fresh")),
+                "fresh_after_satisfied": True,
                 "width": 1,
                 "height": 1,
             },
@@ -1675,6 +1726,7 @@ def test_computer_use_remote_type_submit_sends_submit_flag_and_auto_refreshes_sc
     shared_ws_manager, ws_runtime_mod, tool_mod = _load_computer_use_remote_tool(
         computer_use_handler=handler
     )
+    monkeypatch.setattr(tool_mod.asyncio, "sleep", _no_sleep)
     agent = _FakeRemoteAgent()
     ws_runtime_mod.register_sid("sid-cli")
     ws_runtime_mod.subscribe_sid_to_context("sid-cli", agent.context.id)
@@ -1699,9 +1751,12 @@ def test_computer_use_remote_type_submit_sends_submit_flag_and_auto_refreshes_sc
         ).execute()
     )
 
-    assert response.message == "Typed 21 character(s) and submitted. Latest screen attached."
+    assert response.message == (
+        f"Typed 21 character(s) and submitted. Latest screen attached: {_expected_capture_summary(fresh=True)}"
+    )
     assert shared_ws_manager.calls[0]["payload"]["submit"] is True
     assert [call["payload"]["action"] for call in shared_ws_manager.calls] == ["type", "capture"]
+    _assert_fresh_auto_capture(tool_mod, shared_ws_manager.calls[1]["payload"])
     assert len(agent.history_messages) == 1
 
 

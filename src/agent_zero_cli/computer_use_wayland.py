@@ -37,8 +37,12 @@ WAYLAND_BACKEND_SPEC = register_builtin_backend_spec(
             "portal-remote-desktop",
             "portal-screencast",
             "inline-png-capture",
+            "fresh-frame-capture",
+            "normalized-screen-coordinates",
+            "global-pixel-actions",
             "pointer-injection",
             "keyboard-injection",
+            "real-cursor-may-move",
         ),
         interpreter_strategy="system_python",
         helper_target=_HELPER_TARGET,
@@ -46,4 +50,3 @@ WAYLAND_BACKEND_SPEC = register_builtin_backend_spec(
         support_reason=_support_reason,
     )
 )
-
